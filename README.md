@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # HaromaX6 — Elarion Symbolic Cognitive Agent Framework
 
 *Modular symbolic cognitive agent framework: Memory Forest, multi-agent Flask server, 40+ step cognitive cycle, soul-seeded identity, hardware sensors, and optional RL / training bridges.*
@@ -191,3 +192,7 @@ Optional: bearer token, HTTP rate limits, structured stderr access logs, **`X-Ha
 | HaromaX4 | Gradient wire loop concept, tier 90-100 roadmap |
 | HaromaX5 | Memory Forest, multi-agent framework |
 | **HaromaX6** | Full 40+ step cognitive cycle, online learning, soul binding, sensor integration, X7 features |
+=======
+# haroma
+Modular symbolic cognitive agent framework (Elarion): Memory Forest, multi-agent Flask server, 40+ step cognitive cycle, soul-seeded identity, sensors, and optional RL/training hooks.
+>>>>>>> a053af568e399650a7c68c6ff704f481feea73ac
