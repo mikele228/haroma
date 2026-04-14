@@ -1,0 +1,28 @@
+{
+  "turns": 5,
+  "quality_mean": 35.0,
+  "quality_min": 35.0,
+  "quality_max": 35.0,
+  "quality_slope_per_turn": 0.0,
+  "quality_first_third_mean": 35.0,
+  "quality_mid_third_mean": 35.0,
+  "quality_last_third_mean": 35.0,
+  "within_run_quality_delta_last_minus_first": 0.0,
+  "latency_mean_sec": 1.3833,
+  "latency_max_sec": 2.8502,
+  "latency_p50_sec": 1.1597,
+  "latency_p95_sec": 1.624,
+  "fraction_under_threshold": 0.4,
+  "latency_threshold_sec": 1.0,
+  "all_under_threshold": false,
+  "quality_by_turn": [
+    35.0,
+    35.0,
+    35.0,
+    35.0,
+    35.0
+  ],
+  "quality_by_turn_note": null,
+  "run": 1,
+  "wall_clock_sec": 6.92
+}

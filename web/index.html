@@ -1,0 +1,711 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Elarion — HaromaX6</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --surface2: #1c2333;
+    --border: #30363d;
+    --text: #e6edf3;
+    --text-dim: #8b949e;
+    --accent: #58a6ff;
+    --accent-glow: rgba(88, 166, 255, 0.15);
+    --user-bg: #1f3a5f;
+    --elarion-bg: #1a2332;
+    --positive: #3fb950;
+    --warm: #d29922;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+
+  header {
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 12px 24px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    flex-shrink: 0;
+  }
+  .logo {
+    width: 36px; height: 36px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, #58a6ff, #bc8cff);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 18px; font-weight: 700; color: #fff;
+  }
+  .header-info h1 { font-size: 16px; font-weight: 600; }
+  .header-info .subtitle { font-size: 12px; color: var(--text-dim); }
+  .header-right { margin-left: auto; display: flex; gap: 8px; }
+  .header-right button {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    padding: 6px 12px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 12px;
+    transition: all 0.2s;
+  }
+  .header-right button:hover {
+    background: var(--border);
+    color: var(--text);
+  }
+
+  .main-area {
+    display: flex;
+    flex: 1;
+    overflow: hidden;
+  }
+
+  .chat-panel {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
+
+  #messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 20px 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+  #messages::-webkit-scrollbar { width: 6px; }
+  #messages::-webkit-scrollbar-track { background: transparent; }
+  #messages::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+  .msg {
+    max-width: 80%;
+    padding: 12px 16px;
+    border-radius: 12px;
+    line-height: 1.5;
+    font-size: 14px;
+    animation: fadeIn 0.3s ease;
+  }
+  @keyframes fadeIn {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  .msg.user {
+    align-self: flex-end;
+    background: var(--user-bg);
+    border-bottom-right-radius: 4px;
+  }
+  .msg.elarion {
+    align-self: flex-start;
+    background: var(--elarion-bg);
+    border: 1px solid var(--border);
+    border-bottom-left-radius: 4px;
+  }
+  .msg .meta-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 8px;
+    font-size: 11px;
+  }
+  .tag {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    padding: 2px 8px;
+    border-radius: 10px;
+    color: var(--text-dim);
+  }
+  .tag.emotion { border-color: #d29922; color: #d29922; }
+  .tag.strategy { border-color: #58a6ff; color: #58a6ff; }
+  .tag.cycle { border-color: #3fb950; color: #3fb950; }
+
+  .msg .sender {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-dim);
+    margin-bottom: 4px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
+  .typing-indicator {
+    align-self: flex-start;
+    padding: 12px 16px;
+    background: var(--elarion-bg);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    display: none;
+  }
+  .typing-indicator.active { display: flex; gap: 4px; align-items: center; }
+  .typing-indicator span {
+    width: 6px; height: 6px;
+    background: var(--text-dim);
+    border-radius: 50%;
+    animation: bounce 1.4s infinite;
+  }
+  .typing-indicator span:nth-child(2) { animation-delay: 0.2s; }
+  .typing-indicator span:nth-child(3) { animation-delay: 0.4s; }
+  @keyframes bounce {
+    0%, 60%, 100% { transform: translateY(0); }
+    30% { transform: translateY(-6px); }
+  }
+
+  .input-area {
+    padding: 16px 24px;
+    border-top: 1px solid var(--border);
+    background: var(--surface);
+    flex-shrink: 0;
+  }
+  .input-row {
+    display: flex;
+    gap: 8px;
+    max-width: 900px;
+    margin: 0 auto;
+  }
+  #user-input {
+    flex: 1;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 12px 16px;
+    border-radius: 10px;
+    font-size: 14px;
+    font-family: inherit;
+    outline: none;
+    resize: none;
+    min-height: 44px;
+    max-height: 120px;
+    transition: border-color 0.2s;
+  }
+  #user-input:focus { border-color: var(--accent); }
+  #user-input::placeholder { color: var(--text-dim); }
+  #send-btn {
+    background: var(--accent);
+    border: none;
+    color: #fff;
+    padding: 0 20px;
+    border-radius: 10px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: opacity 0.2s;
+    white-space: nowrap;
+  }
+  #send-btn:hover { opacity: 0.85; }
+  #send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  #cancel-btn {
+    display: none;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    padding: 0 16px;
+    border-radius: 10px;
+    font-size: 13px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  #cancel-btn:hover { border-color: var(--warm); color: var(--warm); }
+
+  /* Side panel */
+  .side-panel {
+    width: 320px;
+    background: var(--surface);
+    border-left: 1px solid var(--border);
+    overflow-y: auto;
+    padding: 16px;
+    font-size: 12px;
+    flex-shrink: 0;
+    display: none;
+  }
+  .side-panel.open { display: block; }
+  .side-panel h3 {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--text-dim);
+    margin: 16px 0 8px;
+  }
+  .side-panel h3:first-child { margin-top: 0; }
+  .stat-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+  }
+  .stat-card {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px;
+  }
+  .stat-card .label { color: var(--text-dim); font-size: 10px; }
+  .stat-card .value { font-size: 16px; font-weight: 600; margin-top: 2px; }
+
+  .bar-row { margin: 4px 0; }
+  .bar-label {
+    display: flex; justify-content: space-between;
+    color: var(--text-dim); margin-bottom: 2px;
+  }
+  .bar-track {
+    height: 4px;
+    background: var(--border);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+  .bar-fill {
+    height: 100%;
+    border-radius: 2px;
+    background: var(--accent);
+    transition: width 0.5s ease;
+  }
+
+  .system-msg {
+    text-align: center;
+    color: var(--text-dim);
+    font-size: 12px;
+    padding: 8px;
+    font-style: italic;
+  }
+
+  .pulse {
+    display: inline-block;
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--positive);
+    margin-right: 6px;
+    animation: pulse-glow 2s infinite;
+  }
+  .pulse.dormant { background: var(--text-dim); animation: none; }
+  @keyframes pulse-glow {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(63, 185, 80, 0.6); }
+    50% { box-shadow: 0 0 6px 3px rgba(63, 185, 80, 0.3); }
+  }
+
+  .life-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 11px;
+    color: var(--text-dim);
+    padding: 0 24px 8px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+  }
+  .life-bar .lbl { opacity: 0.7; }
+  .life-bar .val { color: var(--text); font-weight: 600; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">E</div>
+  <div class="header-info">
+    <h1>Elarion</h1>
+    <div class="subtitle"><span class="pulse" id="pulse"></span>HaromaX6 &mdash; <span id="cycle-counter">cycle 0</span> &mdash; <span id="life-state">booting</span></div>
+  </div>
+  <div class="header-right">
+    <button onclick="togglePanel()" id="panel-toggle">Mind State</button>
+    <button onclick="saveState()">Save</button>
+  </div>
+</header>
+
+<div class="life-bar">
+  <span class="lbl">idle:</span><span class="val" id="lb-idle">0</span>
+  <span class="lbl">external:</span><span class="val" id="lb-ext">0</span>
+  <span class="lbl">buffered:</span><span class="val" id="lb-buf">0</span>
+  <span class="lbl">errors:</span><span class="val" id="lb-err">0</span>
+</div>
+<div class="main-area">
+  <div class="chat-panel">
+    <div id="messages">
+      <div class="system-msg">Connected to Elarion. Say something to begin. The page uses a streaming wait so long replies do not rely on one endless HTTP request; on CPU, the first reply can still take several minutes while the local model loads.</div>
+    </div>
+    <div class="typing-indicator" id="typing">
+      <span></span><span></span><span></span>
+    </div>
+    <div class="input-area">
+      <div class="input-row">
+        <textarea id="user-input" placeholder="Talk to Elarion..." rows="1"></textarea>
+        <button type="button" id="cancel-btn" onclick="cancelInflightChat()">Stop</button>
+        <button id="send-btn" onclick="sendMessage()">Send</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="side-panel" id="side-panel">
+    <h3>Emotion</h3>
+    <div id="emotion-display">
+      <div class="bar-row">
+        <div class="bar-label"><span>Valence</span><span id="val-num">0.0</span></div>
+        <div class="bar-track"><div class="bar-fill" id="val-bar" style="width:50%"></div></div>
+      </div>
+      <div class="bar-row">
+        <div class="bar-label"><span>Arousal</span><span id="aro-num">0.0</span></div>
+        <div class="bar-track"><div class="bar-fill" id="aro-bar" style="width:50%;background:var(--warm)"></div></div>
+      </div>
+    </div>
+
+    <h3>Cognitive State</h3>
+    <div class="stat-grid" id="cognitive-stats">
+      <div class="stat-card"><div class="label">Cycle</div><div class="value" id="s-cycle">0</div></div>
+      <div class="stat-card"><div class="label">Memory</div><div class="value" id="s-memory">0</div></div>
+      <div class="stat-card"><div class="label">KG Entities</div><div class="value" id="s-kg">0</div></div>
+      <div class="stat-card"><div class="label">Goals</div><div class="value" id="s-goals">0</div></div>
+    </div>
+
+    <h3>Drives</h3>
+    <div id="drives-display"></div>
+
+    <h3>Strategy</h3>
+    <div id="strategy-display" class="stat-card" style="grid-column:1/-1">
+      <div class="label">Current</div>
+      <div class="value" id="s-strategy">—</div>
+    </div>
+
+    <h3>Metacognition</h3>
+    <div id="meta-display" style="color:var(--text-dim);line-height:1.5;"></div>
+  </div>
+</div>
+
+<script>
+const API = window.location.origin;
+let panelOpen = false;
+
+let _inflightRid = null;
+let _inflightEs = null;
+let _chatPollCancelled = false;
+let _userCancelled = false;
+
+function setStopVisible(visible) {
+  const b = document.getElementById('cancel-btn');
+  if (b) b.style.display = visible ? 'inline-block' : 'none';
+}
+
+/** Abort waiting for the current async reply (closes SSE, DELETEs pending id, stops poll loop). */
+function cancelInflightChat() {
+  _userCancelled = true;
+  _chatPollCancelled = true;
+  if (_inflightEs) {
+    try { _inflightEs.close(); } catch (_) {}
+    _inflightEs = null;
+  }
+  var rid = _inflightRid;
+  if (rid) {
+    fetch(API + '/chat/result?id=' + encodeURIComponent(rid), { method: 'DELETE' }).catch(function () {});
+  }
+}
+
+window.addEventListener('beforeunload', function () {
+  if (_inflightRid) cancelInflightChat();
+});
+
+function togglePanel() {
+  panelOpen = !panelOpen;
+  document.getElementById('side-panel').classList.toggle('open', panelOpen);
+  document.getElementById('panel-toggle').textContent = panelOpen ? 'Hide Mind' : 'Mind State';
+}
+
+function autoResize(el) {
+  el.style.height = 'auto';
+  el.style.height = Math.min(el.scrollHeight, 120) + 'px';
+}
+
+const input = document.getElementById('user-input');
+input.addEventListener('input', () => autoResize(input));
+input.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendMessage();
+  }
+});
+
+function addMessage(text, sender, meta) {
+  const box = document.getElementById('messages');
+  const div = document.createElement('div');
+  div.className = 'msg ' + sender;
+
+  let html = '';
+  if (sender === 'elarion') html += '<div class="sender">Elarion</div>';
+  html += '<div>' + escapeHtml(text) + '</div>';
+
+  if (meta) {
+    html += '<div class="meta-row">';
+    if (meta.emotion) html += '<span class="tag emotion">' + escapeHtml(meta.emotion) + '</span>';
+    if (meta.strategy) html += '<span class="tag strategy">' + escapeHtml(meta.strategy) + '</span>';
+    if (meta.cycle) html += '<span class="tag cycle">cycle ' + meta.cycle + '</span>';
+    html += '</div>';
+  }
+
+  div.innerHTML = html;
+  box.appendChild(div);
+  box.scrollTop = box.scrollHeight;
+}
+
+function escapeHtml(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+/** Show reply before ``[END_OF_TEXT]``; server uses ``mind.chat_visibility`` / ``mind.cognitive_contracts`` (defense-in-depth). */
+function visibleChatText(s) {
+  if (s == null || s === undefined) return '';
+  let t = String(s);
+  const idx = t.toLowerCase().indexOf('[end_of_text]');
+  if (idx >= 0) t = t.slice(0, idx).replace(/\s+$/, '');
+  return t;
+}
+
+/** Poll ``GET /chat/result`` (fallback if EventSource is unavailable). */
+async function pollChatResult(rid) {
+  _chatPollCancelled = false;
+  const deadline = Date.now() + 3 * 60 * 60 * 1000;
+  while (Date.now() < deadline) {
+    if (_chatPollCancelled) throw new Error('Cancelled');
+    const r = await fetch(API + '/chat/result?id=' + encodeURIComponent(rid));
+    if (r.status === 404) throw new Error('Request expired or unknown id');
+    const data = await r.json();
+    if (data.status !== 'pending') return data;
+    await new Promise(function (res) { setTimeout(res, 400); });
+  }
+  throw new Error('Timed out waiting for reply');
+}
+
+/** Wait for async result via SSE ``GET /chat/wait``; falls back to polling on failure or pending_timeout. */
+function waitChatViaSSE(rid) {
+  return new Promise(function (resolve, reject) {
+    let done = false;
+    const url = API + '/chat/wait?id=' + encodeURIComponent(rid) + '&max_wait_sec=7200';
+    const es = new EventSource(url);
+    _inflightEs = es;
+
+    function finish(ok, val) {
+      if (done) return;
+      done = true;
+      _inflightEs = null;
+      try { es.close(); } catch (_) {}
+      if (ok) resolve(val);
+      else reject(val);
+    }
+
+    es.onmessage = function (e) {
+      let data;
+      try {
+        data = JSON.parse(e.data);
+      } catch (x) {
+        finish(false, x);
+        return;
+      }
+      if (data.error) {
+        finish(false, new Error(data.error));
+        return;
+      }
+      if (data.status === 'pending_timeout') {
+        if (done) return;
+        done = true;
+        try { es.close(); } catch (_) {}
+        pollChatResult(rid).then(function (d) { resolve(d); }).catch(function (err) { reject(err); });
+        return;
+      }
+      finish(true, data);
+    };
+
+    es.onerror = function () {
+      finish(false, new Error('EventSource connection failed'));
+    };
+  });
+}
+
+async function fetchChatResult(rid) {
+  if (typeof EventSource !== 'undefined') {
+    try {
+      return await waitChatViaSSE(rid);
+    } catch (e) {
+      if (e && e.message === 'Cancelled') throw e;
+      console.warn('[Elarion UI] SSE wait failed, using poll', e);
+    }
+  }
+  return await pollChatResult(rid);
+}
+
+const HAROMA_USER_ID_KEY = 'haroma_user_id';
+function getOrCreateUserId() {
+  try {
+    let u = localStorage.getItem(HAROMA_USER_ID_KEY);
+    if (u && u.length > 0) return u;
+    u = 'u_' + Math.random().toString(36).slice(2, 12) + '_' + Date.now().toString(36);
+    localStorage.setItem(HAROMA_USER_ID_KEY, u);
+    return u;
+  } catch (e) {
+    return 'u_anon';
+  }
+}
+
+async function sendMessage() {
+  const text = input.value.trim();
+  if (!text) return;
+
+  _userCancelled = false;
+  input.value = '';
+  autoResize(input);
+  addMessage(text, 'user');
+
+  const btn = document.getElementById('send-btn');
+  btn.disabled = true;
+  document.getElementById('typing').classList.add('active');
+
+  try {
+    const res = await fetch(API + '/chat', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({message: text, depth: 'fast', async: true, user_id: getOrCreateUserId()})
+    });
+
+    if (res.status === 503) {
+      const errData = await res.json().catch(function () { return {}; });
+      throw new Error(errData.response || errData.error || 'Server not ready');
+    }
+
+    let data;
+    if (res.status === 202) {
+      const start = await res.json();
+      const rid = start.request_id;
+      if (!rid) throw new Error('No request_id from server');
+      _inflightRid = rid;
+      setStopVisible(true);
+      try {
+        data = await fetchChatResult(rid);
+      } finally {
+        _inflightRid = null;
+        _inflightEs = null;
+        setStopVisible(false);
+        _chatPollCancelled = false;
+        _userCancelled = false;
+      }
+    } else if (res.ok) {
+      data = await res.json();
+    } else {
+      const errData = await res.json().catch(function () { return {}; });
+      throw new Error(errData.error || ('HTTP ' + res.status));
+    }
+
+    document.getElementById('typing').classList.remove('active');
+    btn.disabled = false;
+
+    const response = visibleChatText(data.response || '...');
+    const meta = {
+      emotion: data.affect?.dominant_emotion || '',
+      strategy: data.strategy || '',
+      cycle: data.cycle || 0,
+    };
+    addMessage(response, 'elarion', meta);
+    document.getElementById('cycle-counter').textContent = 'cycle ' + (data.cycle || 0);
+    updateSidePanel(data);
+  } catch (err) {
+    document.getElementById('typing').classList.remove('active');
+    btn.disabled = false;
+    setStopVisible(false);
+    _inflightRid = null;
+    _inflightEs = null;
+    _chatPollCancelled = false;
+    var msg = err && err.message === 'Cancelled' ? 'Reply stopped.' : ('Connection error: ' + (err && err.message ? err.message : String(err)));
+    addMessage(msg, 'elarion', {});
+  }
+}
+
+function updateSidePanel(data) {
+  const affect = data.affect || {};
+  const val = affect.valence || 0;
+  const aro = affect.arousal || 0;
+  document.getElementById('val-num').textContent = val.toFixed(2);
+  document.getElementById('aro-num').textContent = aro.toFixed(2);
+  document.getElementById('val-bar').style.width = ((val + 1) / 2 * 100) + '%';
+  document.getElementById('aro-bar').style.width = (aro * 100) + '%';
+
+  document.getElementById('s-cycle').textContent = data.cycle || 0;
+  document.getElementById('s-memory').textContent = data.memory_nodes || 0;
+  document.getElementById('s-kg').textContent = data.knowledge?.entity_count || 0;
+  document.getElementById('s-goals').textContent = data.goal_count || 0;
+  document.getElementById('s-strategy').textContent = data.strategy || '—';
+
+  const drives = data.drives || {};
+  const dBox = document.getElementById('drives-display');
+  let dHtml = '';
+  for (const [name, level] of Object.entries(drives.levels || {})) {
+    const pct = (parseFloat(level) * 100).toFixed(0);
+    dHtml += '<div class="bar-row"><div class="bar-label"><span>' + name + '</span><span>' + pct + '%</span></div>';
+    dHtml += '<div class="bar-track"><div class="bar-fill" style="width:' + pct + '%;background:var(--positive)"></div></div></div>';
+  }
+  dBox.innerHTML = dHtml;
+
+  const meta = data.meta || {};
+  const metaBox = document.getElementById('meta-display');
+  const concerns = meta.concerns || [];
+  const insights = meta.insights || [];
+  let mHtml = '';
+  if (concerns.length) mHtml += '<div style="margin-bottom:4px">Concerns: ' + concerns.map(escapeHtml).join(', ') + '</div>';
+  if (insights.length) mHtml += '<div>Insights: ' + insights.map(escapeHtml).join(', ') + '</div>';
+  if (!mHtml) mHtml = 'No active concerns.';
+  metaBox.innerHTML = mHtml;
+}
+
+async function saveState() {
+  try {
+    await fetch(API + '/save', {method: 'POST'});
+    const sys = document.createElement('div');
+    sys.className = 'system-msg';
+    sys.textContent = 'State saved.';
+    document.getElementById('messages').appendChild(sys);
+  } catch(e) {
+    alert('Save failed: ' + e.message);
+  }
+}
+
+// Boot: fetch introspection
+fetch(API + '/introspect').then(r => r.json()).then(data => {
+  const s = data.sentience || {};
+  document.getElementById('s-cycle').textContent = s.cycle_count || 0;
+  document.getElementById('s-memory').textContent = s.memory_nodes || 0;
+  document.getElementById('cycle-counter').textContent = 'cycle ' + (s.cycle_count || 0);
+}).catch(() => {});
+
+// Heartbeat: poll /status to show the life loop is running
+let _lastCycle = 0;
+async function pollStatus() {
+  try {
+    const r = await fetch(API + '/status');
+    const d = await r.json();
+    const ll = d.life_loop || {};
+    const cycle = ll.cycle_count || d.cycle_count || 0;
+    const alive = ll.alive;
+
+    document.getElementById('cycle-counter').textContent = 'cycle ' + cycle;
+    document.getElementById('pulse').className = alive ? 'pulse' : 'pulse dormant';
+    document.getElementById('life-state').textContent = alive ? 'alive' : 'dormant';
+
+    document.getElementById('lb-idle').textContent = ll.idle_cycles || 0;
+    document.getElementById('lb-ext').textContent = ll.external_cycles || 0;
+    document.getElementById('lb-buf').textContent = (ll.buffer?.text_pending || 0) + (ll.buffer?.sensor_pending || 0);
+    document.getElementById('lb-err').textContent = ll.errors || 0;
+
+    if (cycle !== _lastCycle) {
+      document.getElementById('s-cycle').textContent = cycle;
+      _lastCycle = cycle;
+    }
+  } catch(e) {}
+}
+pollStatus();
+setInterval(pollStatus, 3000);
+</script>
+</body>
+</html>

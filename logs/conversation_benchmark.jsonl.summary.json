@@ -1,0 +1,11 @@
+{
+  "turns": 10,
+  "latency_mean_sec": 120.011,
+  "latency_min_sec": 120.002,
+  "latency_max_sec": 120.019,
+  "latency_p50_sec": 120.012,
+  "latency_p95_sec": 120.017,
+  "assistant_turns_with_question": 0,
+  "assistant_question_rate": 0.0,
+  "output_file": "C:\\Project\\HaromaX6\\logs\\conversation_benchmark.jsonl"
+}

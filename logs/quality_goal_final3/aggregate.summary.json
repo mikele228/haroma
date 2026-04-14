@@ -1,0 +1,103 @@
+{
+  "turns_per_run": 10,
+  "num_runs": 5,
+  "depth": "fast",
+  "latency_target_sec": 1.0,
+  "quality_means_per_run": [
+    67.0,
+    66.0,
+    65.0,
+    65.0,
+    67.0
+  ],
+  "latency_mean_per_run": [
+    0.516,
+    0.4081,
+    0.5263,
+    0.4143,
+    0.4314
+  ],
+  "latency_max_per_run": [
+    0.9409,
+    0.7728,
+    1.0212,
+    0.5721,
+    0.469
+  ],
+  "all_runs_all_under_1s": false,
+  "quality_trend_eps": 3.0,
+  "quality_trend_non_decreasing": true,
+  "quality_trend_strict_non_decreasing": false,
+  "runs": [
+    {
+      "turns": 10,
+      "quality_mean": 67.0,
+      "quality_min": 60.0,
+      "latency_mean_sec": 0.516,
+      "latency_max_sec": 0.9409,
+      "latency_p50_sec": 0.443,
+      "latency_p95_sec": 0.8122,
+      "fraction_under_threshold": 1.0,
+      "latency_threshold_sec": 1.0,
+      "all_under_threshold": true,
+      "run": 1,
+      "wall_clock_sec": 5.16
+    },
+    {
+      "turns": 10,
+      "quality_mean": 66.0,
+      "quality_min": 60.0,
+      "latency_mean_sec": 0.4081,
+      "latency_max_sec": 0.7728,
+      "latency_p50_sec": 0.3653,
+      "latency_p95_sec": 0.4112,
+      "fraction_under_threshold": 1.0,
+      "latency_threshold_sec": 1.0,
+      "all_under_threshold": true,
+      "run": 2,
+      "wall_clock_sec": 4.08
+    },
+    {
+      "turns": 10,
+      "quality_mean": 65.0,
+      "quality_min": 60.0,
+      "latency_mean_sec": 0.5263,
+      "latency_max_sec": 1.0212,
+      "latency_p50_sec": 0.4242,
+      "latency_p95_sec": 0.8032,
+      "fraction_under_threshold": 0.9,
+      "latency_threshold_sec": 1.0,
+      "all_under_threshold": false,
+      "run": 3,
+      "wall_clock_sec": 5.27
+    },
+    {
+      "turns": 10,
+      "quality_mean": 65.0,
+      "quality_min": 60.0,
+      "latency_mean_sec": 0.4143,
+      "latency_max_sec": 0.5721,
+      "latency_p50_sec": 0.3682,
+      "latency_p95_sec": 0.5007,
+      "fraction_under_threshold": 1.0,
+      "latency_threshold_sec": 1.0,
+      "all_under_threshold": true,
+      "run": 4,
+      "wall_clock_sec": 4.15
+    },
+    {
+      "turns": 10,
+      "quality_mean": 67.0,
+      "quality_min": 60.0,
+      "latency_mean_sec": 0.4314,
+      "latency_max_sec": 0.469,
+      "latency_p50_sec": 0.4278,
+      "latency_p95_sec": 0.4476,
+      "fraction_under_threshold": 1.0,
+      "latency_threshold_sec": 1.0,
+      "all_under_threshold": true,
+      "run": 5,
+      "wall_clock_sec": 4.32
+    }
+  ]
+}

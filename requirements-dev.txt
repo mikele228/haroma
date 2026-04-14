@@ -1,0 +1,7 @@
+# Dev-only: lint + type check + pre-commit (optional; not needed for runtime)
+# Same roles as AiScript Pixi tasks: pip install -r requirements-dev.txt
+#   then: ruff / mypy / pre-commit manually, or use pixi (see pyproject.toml [tool.pixi.tasks])
+ruff>=0.9.0
+mypy>=1.11.0
+pre-commit>=4.0.0
+pytest>=8.0.0

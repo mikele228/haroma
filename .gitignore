@@ -1,0 +1,6 @@
+# Local deployment secrets (use .env.example as template)
+.env
+
+# Local runtime data and model weights (not tracked)
+data/
+models/

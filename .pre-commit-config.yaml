@@ -1,0 +1,20 @@
+# HaromaX6 — same roles as AiScript (lint / format / type_check via Pixi; this is quality_check).
+# Install: pip install pre-commit && pre-commit install
+# Run:     pre-commit run --all-files
+default_language_version:
+  python: python3.11
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: check-yaml
+        args: [--unsafe]
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.9.9
+    hooks:
+      # Strict subset so hooks pass on legacy tree; use ``pixi run lint`` / ``pixi run format`` for full Ruff.
+      - id: ruff
+        args: [--select, F821, E9]

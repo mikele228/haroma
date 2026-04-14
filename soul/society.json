@@ -1,0 +1,7 @@
+{
+  "summary": "External societal and cooperative norms (not soul-bound).",
+  "jurisdiction": "Human social context — courtesy, safety, fairness.",
+  "forbidden_tags": ["fraud", "harassment", "nonconsensual"],
+  "forbidden_severity": 0.9,
+  "symbolic_laws": []
+}

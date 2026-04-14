@@ -1,0 +1,1116 @@
+"""
+LLM context-reasoning module: packs user turn, recalled memories, and
+stable persona context into a structured LLM prompt, then parses the
+model's JSON reply into an ``LLMContextResult``.
+
+The LLM is treated as a **proposal engine** — its outputs are advisory
+and must be scored / grounded before committing to memory or surfacing
+to the user.
+
+Design choices
+--------------
+* Pure-function ``build_messages`` so it is testable without a live LLM.
+* ``generate_chat``-compatible message list (system + user).
+* JSON schema enforced via prompt instruction (works with any backend).
+* Confidence, citations, ``requires_confirmation``, and ``body_actions``
+  (embodiment aligned to active goals) let downstream modules decide trust level.
+
+Env (debug / probe)
+-------------------
+* ``HAROMA_LLM_LOG_PACKED_STATS`` (``1``/``true``): after ``build_messages``,
+  log one line with UTF-8 byte size, character count, rough token estimate
+  (chars/4), and per-role character counts.
+* ``HAROMA_LLM_DUMMY_REPLY`` (``1``/``true``): skip ``generate_chat`` and
+  return a probe answer with the same stats — use to verify HTTP/cognitive
+  path is not blocked before the model call.
+* ``HAROMA_LLM_CHAT_ONLY`` (``1``/``true``): send only the user line as a
+  single user message (no soul, recall, KG, or JSON schema). The model reply
+  is treated as plain text (not JSON). For JSON-style packed chat, leave
+  this unset.
+* ``HAROMA_LLM_PROMPT_INFO`` (``1``/``true``): include ``prompt_info`` on the
+  result (prompt sizes + ``n_ctx_allocated``). Also enabled automatically
+  when ``HAROMA_LLM_CHAT_ONLY`` is on.
+* ``HAROMA_LLM_JSON_STRICT`` (``1``/``true``): reject model output that is not
+  parseable as a single JSON object (no plain-text fallback). Strips ```json
+  fences before parsing.
+* ``HAROMA_LLM_JSON_ANSWER_KEY`` (default ``answer``): JSON field used as the
+  user-visible reply text after parsing.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
+from typing import Any, Dict, List, Optional
+
+from mind.packed_llm_context import host_environment_sections_for_prompt
+
+
+def _env_truthy(name: str) -> bool:
+    return str(os.environ.get(name, "") or "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def packed_messages_stats(messages: List[Dict[str, str]]) -> Dict[str, Any]:
+    """Measure packed chat prompt size (for logging / dummy probe).
+
+    ``est_tokens_approx`` is a rough lower bound (chars/4); real tokenizer
+    counts differ by model.
+    """
+    by_role: Dict[str, int] = {}
+    total_chars = 0
+    total_bytes = 0
+    for m in messages:
+        role = str(m.get("role", "?"))
+        content = str(m.get("content", "") or "")
+        n = len(content)
+        by_role[role] = by_role.get(role, 0) + n
+        total_chars += n
+        total_bytes += len(content.encode("utf-8"))
+    est = max(1, (total_chars + 3) // 4)
+    return {
+        "message_count": len(messages),
+        "total_chars": total_chars,
+        "total_utf8_bytes": total_bytes,
+        "est_tokens_approx": est,
+        "chars_by_role": dict(by_role),
+    }
+
+
+def _log_packed_stats(
+    stats: Dict[str, Any],
+    *,
+    n_ctx: Optional[int] = None,
+) -> None:
+    _extra = f" | n_ctx_allocated={n_ctx}" if n_ctx is not None else ""
+    print(
+        "[LLMContextReasoner] packed_prompt stats: "
+        f"{stats['total_chars']} chars, {stats['total_utf8_bytes']} UTF-8 bytes, "
+        f"~{stats['est_tokens_approx']} est. tokens (chars/4 rule), "
+        f"{stats['message_count']} messages, chars_by_role={stats['chars_by_role']}"
+        f"{_extra}",
+        flush=True,
+    )
+
+
+def _prompt_info_payload(
+    pack_stats: Dict[str, Any],
+    llm_backend: Any,
+    *,
+    chat_only: bool,
+) -> Dict[str, Any]:
+    """Sizes sent to the model + KV context slot (``n_ctx``) from the backend."""
+    n_ctx = getattr(llm_backend, "_n_ctx", None)
+    return {
+        "prompt_chars": pack_stats["total_chars"],
+        "prompt_utf8_bytes": pack_stats["total_utf8_bytes"],
+        "est_prompt_tokens_approx": pack_stats["est_tokens_approx"],
+        "message_count": pack_stats["message_count"],
+        "chars_by_role": pack_stats["chars_by_role"],
+        "n_ctx_allocated": n_ctx,
+        "chat_only": chat_only,
+    }
+
+
+def _should_include_prompt_info(chat_only: bool, dummy: bool) -> bool:
+    return _env_truthy("HAROMA_LLM_PROMPT_INFO") or chat_only or dummy
+
+
+def _llm_context_timeout_seconds() -> Optional[float]:
+    """Max wall time for one packed ``generate_chat`` call (local GGUF can stall).
+
+    ``HAROMA_LLM_CONTEXT_TIMEOUT_SEC`` (default ``600``): cap wait so the HTTP
+    path can finish. Large GGUF first load + first reply on CPU often exceed
+    several minutes.     Use ``0`` / ``off`` / ``none`` for *unbounded* scheduling; the actual native
+    ``generate_chat`` call is still limited by ``HAROMA_LLM_MAX_GENERATE_SEC``
+    (default 7200s) unless that is set to ``0``/``off`` (can hang forever).
+    Values below ``0.25`` are clamped to ``0.25``.
+    """
+    raw = str(os.environ.get("HAROMA_LLM_CONTEXT_TIMEOUT_SEC", "600") or "").strip().lower()
+    if raw in ("", "0", "off", "none", "false", "no", "inf", "infinite"):
+        return None
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return 600.0
+    if v <= 0:
+        return None
+    return min(max(v, 0.25), 7200.0)
+
+
+def _unbounded_generate_cap_seconds() -> Optional[float]:
+    """When ``HAROMA_LLM_CONTEXT_TIMEOUT_SEC`` is unlimited (``0``/off), still
+    bound ``generate_chat`` so the HTTP thread cannot hang forever on native code.
+
+    ``HAROMA_LLM_MAX_GENERATE_SEC`` (default ``7200``): max seconds for one call.
+    Set ``0`` / ``off`` / ``none`` for a truly synchronous, uncapped call (can hang).
+    """
+    raw = str(os.environ.get("HAROMA_LLM_MAX_GENERATE_SEC", "7200") or "").strip().lower()
+    if raw in ("0", "off", "none", "inf", "infinite"):
+        return None
+    try:
+        v = float(raw) if raw else 7200.0
+    except (TypeError, ValueError):
+        return 7200.0
+    if v <= 0:
+        return None
+    return min(v, 86400.0)
+
+
+_JSON_SCHEMA_DESCRIPTION = """\
+{
+  "answer": "<string or null — proposed reply text; null when unsure>",
+  "confidence": <float 0.0–1.0>,
+  "reasoning_steps": ["<step 1>", "<step 2>", ...],
+  "inferences": [
+    {"subject": "<str>", "predicate": "<str>", "object": "<str>", "confidence": <float 0.0–1.0>}
+  ],
+  "cited_memories": [<int indices into RECALLED MEMORIES>],
+  "requires_confirmation": <true if answer is speculative and needs KG/memory grounding>,
+  "env_updates": {
+    "emotion": {"label": "<str from joy|wonder|curiosity|fear|sadness|anger|resolve|peace|surprise|neutral>", "intensity": <float 0.0–1.0>},
+    "goals": [{"goal_id": "<str>", "description": "<str>", "priority": <float 0.0–1.0>}],
+    "personality_nudges": [{"trait": "<openness|conscientiousness|extraversion|agreeableness|neuroticism|resilience|assertiveness>", "delta": <float -0.01..0.01>}],
+    "kg_triples": [{"subject": "<str>", "predicate": "<str>", "object": "<str>", "confidence": <float>}],
+    "wm_notes": [{"content": "<str>", "salience": <float 0.0–1.0>}],
+    "memory_notes": [{"tree": "<tree_name>", "content": "<str>", "tags": ["<str>"]}]
+  },
+  "body_actions": [
+    {
+      "label": "<short name for this embodiment / actuator intent>",
+      "layer": "<hardware|proprioception|localization|scene|control|safety|perception|speech|other>",
+      "command": "<machine-oriented hint e.g. move_base, set_pose, look_at, gesture, torque, speak>",
+      "parameters": {},
+      "supports_goal_id": "<goal_id from Active goals in [PERSONA] — empty if none applies>",
+      "rationale": "<how this motion advances that goal and respects [ROBOT BODY STATE]>",
+      "priority": <float 0.0–1.0 relative urgency vs other body_actions this turn>,
+      "resource": "<base|arm|head|hands|full_body|speech|none — actuator resource to schedule>",
+      "cancel_current": <bool — true if this should preempt conflicting motion on that resource>,
+      "safety_class": "<safe|caution|restricted|human_present|estop_required|no_motion>",
+      "duration_hint_sec": <float optional — expected motion or hold duration>,
+      "coordinate_frame": "<str optional — must match localization.frame_id when moving in map>",
+      "preconditions": ["<sensor/state checks before executing, e.g. pose_valid>"],
+      "confidence": <float 0.0–1.0>
+    }
+  ]
+}"""
+
+_JSON_SCHEMA_DELIBERATIVE_EXT = """\
+  "candidate_actions": [
+    {
+      "id": "<short unique action identifier>",
+      "label": "<human-readable action name>",
+      "strategy": "<one of: inform, inquire, empathize, reflect, advance_goal, explore, observe>",
+      "rationale": "<1-2 sentence explanation of why this action is appropriate>",
+      "value_impact": {
+        "<value_key>": <float -1.0 to 1.0 — estimated directional effect on this value>
+      },
+      "goal_impact": {
+        "<goal_id>": <float ~-0.5..0.5 — estimated change to that goal's priority / urgency>
+      },
+      "belief_impact": [
+        {"proposition": "<short belief statement>", "confidence_delta": <float -1..1>}
+      ],
+      "law_risk": <float 0.0–1.0 — estimated probability this action violates an active law from [AGENT STATE JSON].laws>,
+      "emotion_alignment": <float -1.0 to 1.0 — how well this action fits the agent's current affect in [AGENT STATE JSON].affect>,
+      "action_tags": ["<optional content tags for law overlap e.g. same vocabulary as law forbidden tags>"],
+      "confidence": <float 0.0–1.0>
+    }
+  ]"""
+
+_MAX_CANDIDATE_ACTIONS = 8
+_MAX_ACTION_TAGS_PER_CANDIDATE = 8
+_MAX_BODY_ACTIONS = 8
+
+_MAX_RECALL_CHARS = 800
+_MAX_KG_TRIPLES = 30
+_MAX_GOAL_LINES = 8
+_MAX_LAW_LINES = 12
+_MAX_VALUE_KEYS = 10
+_MAX_SOUL_JSON_CHARS = max(
+    512,
+    min(100_000, int(os.environ.get("HAROMA_SOUL_PROMPT_MAX_CHARS", "2000"))),
+)
+
+
+def _truncate(text: str, limit: int = 200) -> str:
+    return text[:limit] + ("…" if len(text) > limit else "")
+
+
+# ------------------------------------------------------------------
+# Prompt builder (pure function)
+# ------------------------------------------------------------------
+
+
+def build_messages(
+    *,
+    user_text: str,
+    recalled_memories: List[Dict[str, Any]],
+    identity_summary: Dict[str, Any],
+    personality_summary: Dict[str, float],
+    active_goals: List[Dict[str, Any]],
+    law_summary: Dict[str, Any],
+    value_summary: Dict[str, Any],
+    knowledge_triples: Optional[List[Any]] = None,
+    discourse_context: str = "",
+    nlu_result: Optional[Dict[str, Any]] = None,
+    memory_forest_seed: str = "",
+    llm_centric: bool = False,
+    deliberative: bool = False,
+    agent_state_json: str = "",
+    agent_environment: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, str]]:
+    """Build an OpenAI-style message list for the context-reasoning pass.
+
+    When *deliberative* is True, the schema is extended with
+    ``candidate_actions`` (each with ``value_impact``) and the agent's full
+    state snapshot is included as ``[AGENT STATE JSON]`` in the user message.
+
+    Returns ``[{"role": "system", ...}, {"role": "user", ...}]``.
+    """
+    # --- System message: persona + rules ---------------------------------
+    persona_lines: List[str] = []
+    name = identity_summary.get("essence_name") or "Agent"
+    vessel = identity_summary.get("vessel", "")
+    role = identity_summary.get("current_role", "observer")
+    phase = identity_summary.get("current_phase", "stable")
+    persona_lines.append(
+        f"You are {name}"
+        + (f" ({vessel})" if vessel else "")
+        + f", currently in role={role}, phase={phase}."
+    )
+
+    _soul = identity_summary.get("soul")
+    if isinstance(_soul, dict) and _soul:
+        try:
+            soul_txt = json.dumps(_soul, ensure_ascii=False, default=str)
+            if len(soul_txt) > _MAX_SOUL_JSON_CHARS:
+                soul_txt = soul_txt[:_MAX_SOUL_JSON_CHARS] + "…"
+            persona_lines.append(
+                "Bound soul snapshot (authoritative JSON from soul/*.json):\n" + soul_txt
+            )
+        except (TypeError, ValueError):
+            pass
+    else:
+        _birth = str(identity_summary.get("birth") or "").strip()
+        if _birth:
+            persona_lines.append(
+                f"Soul-record origin timestamp (for temporal / duration reasoning): {_birth}."
+            )
+
+    if personality_summary:
+        traits = ", ".join(f"{k}={v:.2f}" for k, v in sorted(personality_summary.items()))
+        persona_lines.append(f"Personality traits: {traits}.")
+
+    # Goals
+    if active_goals:
+        goal_strs = []
+        for g in active_goals[:_MAX_GOAL_LINES]:
+            desc = g.get("description", g.get("goal_id", str(g)))
+            pri = g.get("priority", "?")
+            goal_strs.append(f"  - {desc} (priority {pri})")
+        persona_lines.append("Active goals:\n" + "\n".join(goal_strs))
+
+    # Laws
+    law_ids = law_summary.get("ids", [])
+    if law_ids:
+        persona_lines.append(
+            "Applicable laws/constraints: "
+            + ", ".join(str(lid) for lid in law_ids[:_MAX_LAW_LINES])
+            + "."
+        )
+
+    # Values
+    vkeys = value_summary.get("value_keys", [])
+    if vkeys:
+        persona_lines.append(
+            "Core values: " + ", ".join(str(v) for v in vkeys[:_MAX_VALUE_KEYS]) + "."
+        )
+
+    _env_rules = ""
+    if llm_centric:
+        _env_rules = (
+            "- You are the sole response generator. ALWAYS populate env_updates.\n"
+            "- env_updates.emotion: set the emotion you believe the agent should "
+            "feel after this interaction. Use one of: joy, wonder, curiosity, "
+            "fear, sadness, anger, resolve, peace, surprise, neutral.\n"
+            "- env_updates.goals: register new goals or reinforce existing ones "
+            "when the conversation reveals them (max 3 per turn).\n"
+            "- env_updates.personality_nudges: tiny trait adjustments (-0.01 to "
+            "0.01) only when the interaction clearly warrants a shift.\n"
+            "- env_updates.kg_triples: extract factual relationships from the "
+            "conversation (max 5 per turn).\n"
+            "- env_updates.wm_notes: short notes to remember for immediate "
+            "context (max 3 per turn).\n"
+            "- env_updates.memory_notes: important facts to store long-term "
+            "in specific memory trees (max 3 per turn).\n"
+        )
+
+    _schema_block = _JSON_SCHEMA_DESCRIPTION
+    _deliberative_rules = ""
+    if deliberative:
+        _schema_block = (
+            _JSON_SCHEMA_DESCRIPTION.rstrip().rstrip("}")
+            + ",\n"
+            + _JSON_SCHEMA_DELIBERATIVE_EXT
+            + "\n}"
+        )
+        _deliberative_rules = (
+            "- DELIBERATIVE MODE: You MUST also populate candidate_actions "
+            f"(1–{_MAX_CANDIDATE_ACTIONS} actions). For each action, estimate "
+            "how executing it would shift each value key listed in "
+            "[AGENT STATE JSON].values (positive = reinforces, negative = harms). "
+            "value_impact keys MUST match value keys from the state.\n"
+            "- Also provide goal_impact for active goal_ids when relevant "
+            "(priority delta), and belief_impact as propositions whose credence "
+            "would shift if the action were taken.\n"
+            "- For each candidate, set law_risk (0.0–1.0) based on whether "
+            "the action could violate any law listed in [AGENT STATE JSON].laws "
+            "(0 = clearly safe, 1 = certain violation).\n"
+            "- For each candidate, set emotion_alignment (-1.0 to 1.0) based on "
+            "how congruent the action is with the agent's current affect in "
+            "[AGENT STATE JSON].affect (positive = harmonious, negative = discordant).\n"
+            "- Optional action_tags: short lowercase tokens describing the action's "
+            "content (for law overlap); use tags that could match forbidden law tags.\n"
+            "- Example candidate fragment: "
+            '{"id":"c1","label":"Listen","strategy":"empathize","law_risk":0.1,'
+            '"emotion_alignment":0.5,"action_tags":["support"],"confidence":0.7}'
+            "\n"
+            "- Rank candidate_actions from most to least recommended.\n"
+        )
+
+    system_text = (
+        "You are a reasoning assistant embedded inside a cognitive agent. "
+        "Given the context below, reason step-by-step about the user's "
+        "message and produce a JSON response conforming to the schema.\n\n"
+        "[PERSONA]\n" + "\n".join(persona_lines) + "\n\n"
+        "[OUTPUT JSON SCHEMA]\n" + _schema_block + "\n\n"
+        "Rules:\n"
+        "- ALWAYS prefer grounding your answer in [MEMORY FOREST SEED], "
+        "[RECALLED MEMORIES], and [KNOWLEDGE GRAPH] when they contain relevant "
+        "facts.  Synthesize the information in your own words — do not copy "
+        "recalled text verbatim.\n"
+        "- Cite every recalled memory you use by its 0-based index in "
+        "cited_memories so downstream modules can verify provenance.\n"
+        "- When [RECALLED MEMORIES] or [KNOWLEDGE GRAPH] are insufficient but "
+        "[PERSONA] or the bound soul snapshot contains the needed facts, "
+        "answer concisely with requires_confirmation=false and confidence "
+        "at least 0.8; cited_memories may be [].\n"
+        "- When the answer follows only from correct reasoning on the user "
+        "message (e.g. stated arithmetic), use requires_confirmation=false, "
+        "confidence at least 0.9, cited_memories [].\n"
+        "- If no source provides adequate support, set answer=null and "
+        "requires_confirmation=true.  Do NOT hallucinate facts.\n"
+        "- Confidence must reflect how well-supported the answer is by the "
+        "provided context — not your general knowledge.\n"
+        "- Keep reasoning_steps concise (max 5 steps).\n"
+        "- When [ROBOT BODY STATE] is present, treat it as the agent's embodiment "
+        "(hardware, proprioception, localization, scene). Prefer physically plausible "
+        "body_actions consistent with those readings.\n"
+        "- When [ROBOT BRIDGE FEEDBACK] is present, it lists recent on-robot command "
+        "results (command_id, status), possibly across multiple correlation batches. "
+        "Align new body_actions with completed/failed work; do not repeat successful "
+        "moves unless the user asks. If a command_id shows failed/rejected, prefer a "
+        "different approach or parameters rather than blindly re-issuing the same intent.\n"
+        "- Populate body_actions (0–8) with embodiment / actuation intents that serve "
+        "the user message and **Active goals** in [PERSONA]: set supports_goal_id to a "
+        "goal_id listed there when an action materially advances that goal; use \"\" "
+        "if none applies. If [ROBOT BODY STATE] shows ESTOP or safety.human_in_zone, "
+        "prefer safety_class caution/restricted/no_motion until cleared.\n"
+        + _env_rules
+        + _deliberative_rules
+        + "- Output ONLY valid JSON, no markdown fences or extra text.\n"
+        + (
+            "\nSTRICT JSON (HAROMA_LLM_JSON_STRICT): reply must be a single JSON object, "
+            "first character `{`, last `}`. No prose or code fences before/after.\n"
+            if _env_json_strict()
+            else ""
+        )
+    )
+
+    # --- User message + context ------------------------------------------
+    user_parts: List[str] = []
+
+    # Memory forest seed (per-tree context snapshot)
+    if memory_forest_seed:
+        user_parts.append(memory_forest_seed)
+
+    # Recalled memories
+    if recalled_memories:
+        mem_lines: List[str] = []
+        total_chars = 0
+        for idx, mem in enumerate(recalled_memories):
+            content = str(
+                mem.get("content", "")
+                if isinstance(mem, dict)
+                else getattr(mem, "content", str(mem))
+            ).strip()
+            if not content:
+                continue
+            snippet = _truncate(content, 200)
+            if total_chars + len(snippet) > _MAX_RECALL_CHARS:
+                break
+            mem_lines.append(f"  [{idx}] {snippet}")
+            total_chars += len(snippet)
+        if mem_lines:
+            user_parts.append("[RECALLED MEMORIES]\n" + "\n".join(mem_lines))
+
+    # Knowledge graph triples
+    if knowledge_triples:
+        triple_strs: List[str] = []
+        for t in knowledge_triples[:_MAX_KG_TRIPLES]:
+            if isinstance(t, str):
+                triple_strs.append(f"  {t}")
+            elif isinstance(t, dict):
+                s = t.get("subject", "?")
+                p = t.get("predicate", "?")
+                o = t.get("object", "?")
+                triple_strs.append(f"  {s} --[{p}]--> {o}")
+        if triple_strs:
+            user_parts.append("[KNOWLEDGE GRAPH]\n" + "\n".join(triple_strs))
+
+    # Discourse / conversation
+    if discourse_context:
+        user_parts.append("[CONVERSATION CONTEXT]\n  " + _truncate(discourse_context, 400))
+
+    # NLU
+    if nlu_result:
+        intent = nlu_result.get("intent", "")
+        entities = nlu_result.get("entities", [])
+        if intent or entities:
+            nlu_str = f"intent={intent}"
+            if entities:
+                ent_strs = [
+                    e.get("text", str(e))[:60]
+                    for e in (entities[:6] if isinstance(entities, list) else [])
+                ]
+                nlu_str += ", entities=[" + ", ".join(ent_strs) + "]"
+            user_parts.append(f"[NLU] {nlu_str}")
+
+    if deliberative and agent_state_json:
+        user_parts.append(f"[AGENT STATE JSON]\n{agent_state_json}")
+
+    # Host world + embodiment (see ``mind.packed_llm_context`` for pipeline notes).
+    user_parts.extend(host_environment_sections_for_prompt(agent_environment))
+
+    user_parts.append(f"[USER MESSAGE]\n{user_text}")
+
+    return [
+        {"role": "system", "content": system_text},
+        {"role": "user", "content": "\n\n".join(user_parts)},
+    ]
+
+
+# ------------------------------------------------------------------
+# Response parser
+# ------------------------------------------------------------------
+
+
+def _env_json_strict() -> bool:
+    return _env_truthy("HAROMA_LLM_JSON_STRICT")
+
+
+def _json_answer_key() -> str:
+    k = (os.environ.get("HAROMA_LLM_JSON_ANSWER_KEY") or "answer").strip()
+    return k if k else "answer"
+
+
+def _preprocess_raw_for_json(raw: str) -> str:
+    """Strip markdown fences so brace-based JSON extraction can succeed."""
+    s = (raw or "").strip()
+    if not s or "```" not in s:
+        return s
+    i = s.find("```")
+    rest = s[i + 3 :].lstrip()
+    if len(rest) >= 4 and rest[:4].lower() == "json":
+        rest = rest[4:].lstrip()
+    end = rest.find("```")
+    if end != -1:
+        inner = rest[:end].strip()
+        if inner:
+            return inner
+    return s
+
+
+def _extract_json(raw: str) -> Optional[Dict[str, Any]]:
+    """Best-effort extraction of the first JSON object from LLM output."""
+    raw = raw.strip()
+    # Strip markdown code fences if present
+    if raw.startswith("```"):
+        lines = raw.split("\n", 1)
+        raw = lines[1] if len(lines) > 1 else ""
+        if raw.endswith("```"):
+            raw = raw[:-3]
+        raw = raw.strip()
+
+    # Try direct parse first
+    try:
+        obj = json.loads(raw)
+        if isinstance(obj, dict):
+            return obj
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    # Find first { ... } block via brace counting; validate with json.loads
+    # to avoid false positives from braces inside string literals.
+    m = re.search(r"\{", raw)
+    if not m:
+        return None
+    depth = 0
+    start = m.start()
+    for i in range(start, len(raw)):
+        if raw[i] == "{":
+            depth += 1
+        elif raw[i] == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    obj = json.loads(raw[start : i + 1])
+                    if isinstance(obj, dict):
+                        return obj
+                except (json.JSONDecodeError, ValueError):
+                    pass
+                # Brace mismatch due to string contents; keep scanning
+                break
+    return None
+
+
+def _parse_candidate_actions_from_obj(obj: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Normalize deliberative ``candidate_actions`` from model JSON."""
+    candidate_actions: List[Dict[str, Any]] = []
+    for ca in obj.get("candidate_actions") or []:
+        if not isinstance(ca, dict):
+            continue
+        label = str(ca.get("label") or ca.get("id") or "").strip()
+        if not label:
+            continue
+        vi = ca.get("value_impact")
+        safe_vi: Dict[str, float] = {}
+        if isinstance(vi, dict):
+            for vk, vv in vi.items():
+                try:
+                    safe_vi[str(vk)] = max(-1.0, min(1.0, float(vv)))
+                except (TypeError, ValueError):
+                    pass
+        ca_conf = 0.5
+        try:
+            ca_conf = max(0.0, min(1.0, float(ca.get("confidence", 0.5))))
+        except (TypeError, ValueError):
+            pass
+
+        gi_raw = ca.get("goal_impact")
+        safe_gi: Dict[str, float] = {}
+        if isinstance(gi_raw, dict):
+            for gk, gv in gi_raw.items():
+                try:
+                    safe_gi[str(gk)[:80]] = max(-0.5, min(0.5, float(gv)))
+                except (TypeError, ValueError):
+                    pass
+
+        belief_rows: List[Dict[str, Any]] = []
+        bi_raw = ca.get("belief_impact")
+        if isinstance(bi_raw, list):
+            for row in bi_raw[:6]:
+                if not isinstance(row, dict):
+                    continue
+                prop = str(row.get("proposition") or row.get("belief") or "").strip()
+                if not prop:
+                    continue
+                try:
+                    cd = max(-1.0, min(1.0, float(row.get("confidence_delta", 0.0))))
+                except (TypeError, ValueError):
+                    cd = 0.0
+                belief_rows.append(
+                    {
+                        "proposition": prop[:400],
+                        "confidence_delta": cd,
+                    }
+                )
+
+        ca_law_risk = 0.0
+        try:
+            ca_law_risk = max(0.0, min(1.0, float(ca.get("law_risk", 0.0))))
+        except (TypeError, ValueError):
+            ca_law_risk = 0.0
+
+        ca_emotion_align = 0.0
+        try:
+            ca_emotion_align = max(-1.0, min(1.0, float(ca.get("emotion_alignment", 0.0))))
+        except (TypeError, ValueError):
+            ca_emotion_align = 0.0
+
+        action_tags: List[str] = []
+        at_raw = ca.get("action_tags")
+        if isinstance(at_raw, (list, tuple)):
+            for t in at_raw[:_MAX_ACTION_TAGS_PER_CANDIDATE]:
+                if t is None:
+                    continue
+                s = str(t).strip().lower()[:40]
+                if s:
+                    action_tags.append(s)
+
+        candidate_actions.append(
+            {
+                "id": str(ca.get("id") or label)[:60],
+                "label": label[:120],
+                "strategy": str(ca.get("strategy") or "")[:30],
+                "rationale": str(ca.get("rationale") or "")[:300],
+                "value_impact": safe_vi,
+                "goal_impact": safe_gi,
+                "belief_impact": belief_rows,
+                "law_risk": ca_law_risk,
+                "emotion_alignment": ca_emotion_align,
+                "action_tags": action_tags,
+                "confidence": ca_conf,
+            }
+        )
+    return candidate_actions[:_MAX_CANDIDATE_ACTIONS]
+
+
+def _parse_body_actions_from_obj(obj: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Normalize embodiment ``body_actions`` from model JSON."""
+    body_actions: List[Dict[str, Any]] = []
+    for ba in obj.get("body_actions") or []:
+        if not isinstance(ba, dict):
+            continue
+        label = str(ba.get("label") or "").strip()
+        if not label:
+            continue
+        params: Dict[str, Any] = {}
+        pr = ba.get("parameters")
+        if isinstance(pr, dict):
+            params = pr
+        ba_conf = 0.5
+        try:
+            ba_conf = max(0.0, min(1.0, float(ba.get("confidence", 0.5))))
+        except (TypeError, ValueError):
+            pass
+        dur: Optional[float] = None
+        try:
+            if ba.get("duration_hint_sec") is not None:
+                dur = max(0.0, min(86400.0, float(ba["duration_hint_sec"])))
+        except (TypeError, ValueError):
+            dur = None
+        sc = str(ba.get("safety_class") or "").strip().lower()[:48]
+        pre: List[str] = []
+        prq = ba.get("preconditions")
+        if isinstance(prq, (list, tuple)):
+            for p in prq[:8]:
+                s = str(p).strip()[:120]
+                if s:
+                    pre.append(s)
+        pri = 0.5
+        try:
+            if ba.get("priority") is not None:
+                pri = max(0.0, min(1.0, float(ba["priority"])))
+        except (TypeError, ValueError):
+            pri = 0.5
+        res = str(ba.get("resource") or "none").strip().lower()[:32]
+        cc = bool(ba.get("cancel_current")) if ba.get("cancel_current") is not None else False
+        body_actions.append(
+            {
+                "label": label[:160],
+                "layer": str(ba.get("layer") or "other").strip().lower()[:40],
+                "command": str(ba.get("command") or "")[:120],
+                "parameters": params,
+                "supports_goal_id": str(ba.get("supports_goal_id") or "")[:80],
+                "rationale": str(ba.get("rationale") or "")[:400],
+                "priority": pri,
+                "resource": res,
+                "cancel_current": cc,
+                "safety_class": sc,
+                "duration_hint_sec": dur,
+                "coordinate_frame": str(ba.get("coordinate_frame") or "")[:64],
+                "preconditions": pre,
+                "confidence": ba_conf,
+            }
+        )
+    return body_actions[:_MAX_BODY_ACTIONS]
+
+
+def parse_response(raw: Optional[str]) -> "LLMContextResult":
+    """Parse the LLM's raw text into a validated ``LLMContextResult``."""
+    if not raw:
+        return LLMContextResult.empty("llm_empty_response")
+
+    processed = _preprocess_raw_for_json(raw)
+    obj = _extract_json(processed)
+    if obj is None:
+        obj = _extract_json((raw or "").strip())
+
+    if obj is None:
+        if _env_json_strict():
+            return LLMContextResult.empty("json_parse_failed")
+        # Models often return prose or markdown instead of strict JSON; still show it.
+        plain = (raw or "").strip()
+        if plain.startswith("```"):
+            lines = plain.split("\n")
+            if len(lines) >= 2 and lines[0].strip().startswith("```"):
+                plain = "\n".join(lines[1:])
+                if plain.rstrip().endswith("```"):
+                    plain = plain.rstrip()[:-3].rstrip()
+        plain = plain.strip()
+        if plain:
+            return LLMContextResult(
+                answer=plain[:8000],
+                confidence=0.45,
+                reasoning_steps=[],
+                requires_confirmation=True,
+                source="llm_nonjson_reply",
+            )
+        return LLMContextResult.empty("json_parse_failed")
+
+    ak = _json_answer_key()
+    answer = obj.get(ak)
+    if answer is None and ak != "answer":
+        answer = obj.get("answer")
+    if answer is not None:
+        answer = str(answer).strip() or None
+
+    confidence = 0.0
+    try:
+        confidence = max(0.0, min(1.0, float(obj.get("confidence", 0.0))))
+    except (TypeError, ValueError):
+        pass
+
+    steps: List[str] = []
+    for s in obj.get("reasoning_steps") or []:
+        s_str = str(s).strip()
+        if s_str:
+            steps.append(s_str[:300])
+    steps = steps[:5]
+
+    inferences: List[Dict[str, Any]] = []
+    for inf in obj.get("inferences") or []:
+        if not isinstance(inf, dict):
+            continue
+        subj = str(inf.get("subject", "")).strip()
+        pred = str(inf.get("predicate", "")).strip()
+        obj_name = str(inf.get("object", "")).strip()
+        if subj and pred and obj_name:
+            c = 0.5
+            try:
+                c = max(0.0, min(1.0, float(inf.get("confidence", 0.5))))
+            except (TypeError, ValueError):
+                pass
+            inferences.append(
+                {
+                    "subject": subj,
+                    "predicate": pred,
+                    "object": obj_name,
+                    "confidence": c,
+                    "source": "llm_context_reasoning",
+                }
+            )
+    inferences = inferences[:15]
+
+    cited: List[int] = []
+    for c_idx in obj.get("cited_memories") or []:
+        try:
+            cited.append(int(c_idx))
+        except (TypeError, ValueError):
+            pass
+
+    requires_confirmation = bool(obj.get("requires_confirmation", True))
+
+    raw_env = obj.get("env_updates")
+    env_updates: Dict[str, Any] = {}
+    if isinstance(raw_env, dict):
+        env_updates = raw_env
+
+    candidate_actions = _parse_candidate_actions_from_obj(obj)
+    body_actions = _parse_body_actions_from_obj(obj)
+
+    return LLMContextResult(
+        answer=answer,
+        confidence=confidence,
+        reasoning_steps=steps,
+        inferences=inferences,
+        cited_memories=cited,
+        requires_confirmation=requires_confirmation,
+        source="llm_context_reasoning",
+        raw_json=obj,
+        env_updates=env_updates,
+        candidate_actions=candidate_actions,
+        body_actions=body_actions,
+    )
+
+
+# ------------------------------------------------------------------
+# Result container
+# ------------------------------------------------------------------
+
+
+class LLMContextResult:
+    """Structured output from a context-reasoning LLM pass."""
+
+    __slots__ = (
+        "answer",
+        "confidence",
+        "reasoning_steps",
+        "inferences",
+        "cited_memories",
+        "requires_confirmation",
+        "source",
+        "raw_json",
+        "latency_ms",
+        "env_updates",
+        "prompt_info",
+        "candidate_actions",
+        "body_actions",
+    )
+
+    def __init__(
+        self,
+        *,
+        answer: Optional[str] = None,
+        confidence: float = 0.0,
+        reasoning_steps: Optional[List[str]] = None,
+        inferences: Optional[List[Dict[str, Any]]] = None,
+        cited_memories: Optional[List[int]] = None,
+        requires_confirmation: bool = True,
+        source: str = "llm_context_reasoning",
+        raw_json: Optional[Dict[str, Any]] = None,
+        latency_ms: float = 0.0,
+        env_updates: Optional[Dict[str, Any]] = None,
+        prompt_info: Optional[Dict[str, Any]] = None,
+        candidate_actions: Optional[List[Dict[str, Any]]] = None,
+        body_actions: Optional[List[Dict[str, Any]]] = None,
+    ):
+        self.answer = answer
+        self.confidence = confidence
+        self.reasoning_steps = reasoning_steps or []
+        self.inferences = inferences or []
+        self.cited_memories = cited_memories or []
+        self.requires_confirmation = requires_confirmation
+        self.source = source
+        self.raw_json = raw_json
+        self.latency_ms = latency_ms
+        self.env_updates = env_updates or {}
+        self.prompt_info = prompt_info
+        self.candidate_actions = candidate_actions or []
+        self.body_actions = body_actions or []
+
+    @classmethod
+    def empty(cls, source: str = "unavailable") -> "LLMContextResult":
+        return cls(source=source)
+
+    @property
+    def has_answer(self) -> bool:
+        return self.answer is not None and len(self.answer.strip()) > 0
+
+    @property
+    def is_grounded(self) -> bool:
+        """True when the answer is backed by memory citations or high confidence."""
+        if not self.has_answer:
+            return False
+        if self.requires_confirmation:
+            return False
+        return self.confidence >= 0.4 or len(self.cited_memories) > 0
+
+    def to_dict(self) -> Dict[str, Any]:
+        out = {
+            "answer": self.answer,
+            "confidence": self.confidence,
+            "reasoning_steps": self.reasoning_steps,
+            "inferences": self.inferences,
+            "cited_memories": self.cited_memories,
+            "requires_confirmation": self.requires_confirmation,
+            "source": self.source,
+            "latency_ms": self.latency_ms,
+            "env_updates": self.env_updates,
+        }
+        if self.prompt_info:
+            out["prompt_info"] = self.prompt_info
+        # Always include so downstream (deliberative, HTTP) sees a stable shape;
+        # use [] when the model proposed no structured candidates.
+        out["candidate_actions"] = self.candidate_actions
+        out["body_actions"] = self.body_actions
+        return out
+
+
+# ------------------------------------------------------------------
+# Orchestrator: build → call LLM → parse
+# ------------------------------------------------------------------
+
+
+def run_llm_context_reasoning(
+    *,
+    llm_backend: Any,
+    user_text: str,
+    recalled_memories: List[Dict[str, Any]],
+    identity_summary: Dict[str, Any],
+    personality_summary: Dict[str, float],
+    active_goals: List[Dict[str, Any]],
+    law_summary: Dict[str, Any],
+    value_summary: Dict[str, Any],
+    knowledge_triples: Optional[List[Any]] = None,
+    discourse_context: str = "",
+    nlu_result: Optional[Dict[str, Any]] = None,
+    memory_forest_seed: str = "",
+    llm_centric: bool = False,
+    max_tokens: Optional[int] = None,
+    temperature: float = 0.3,
+    timeout_override: Optional[float] = None,
+    deliberative: bool = False,
+    agent_state_json: str = "",
+    agent_environment: Optional[Dict[str, Any]] = None,
+) -> LLMContextResult:
+    """End-to-end: pack context → LLM call → parse JSON → result.
+
+    Safe to call even when the LLM backend is ``None`` or unavailable;
+    returns an empty result in that case.
+    """
+    if llm_backend is None or not getattr(llm_backend, "available", False):
+        return LLMContextResult.empty("llm_unavailable")
+
+    _mt = max_tokens
+    if _mt is None:
+        try:
+            _mt = int(os.environ.get("HAROMA_LLM_CONTEXT_MAX_TOKENS", "192") or "192")
+        except (TypeError, ValueError):
+            _mt = 256
+        _mt = max(64, min(768, _mt))
+
+    _chat_only = _env_truthy("HAROMA_LLM_CHAT_ONLY")
+    _t_pack0 = time.perf_counter()
+    if _chat_only:
+        _ut = (user_text or "").strip() or "."
+        messages = [{"role": "user", "content": _ut}]
+        print(
+            "[LLMContextReasoner] HAROMA_LLM_CHAT_ONLY=1 — single user message, "
+            "no packed soul/recall/KG (plain text reply, not JSON).",
+            flush=True,
+        )
+    else:
+        messages = build_messages(
+            user_text=user_text,
+            recalled_memories=recalled_memories,
+            identity_summary=identity_summary,
+            personality_summary=personality_summary,
+            active_goals=active_goals,
+            law_summary=law_summary,
+            value_summary=value_summary,
+            knowledge_triples=knowledge_triples,
+            discourse_context=discourse_context,
+            nlu_result=nlu_result,
+            memory_forest_seed=memory_forest_seed,
+            llm_centric=llm_centric,
+            deliberative=deliberative,
+            agent_state_json=agent_state_json,
+            agent_environment=agent_environment,
+        )
+    _pack_stats = packed_messages_stats(messages)
+    _log_stats = _env_truthy("HAROMA_LLM_LOG_PACKED_STATS")
+    _dummy = _env_truthy("HAROMA_LLM_DUMMY_REPLY")
+    _n_ctx = getattr(llm_backend, "_n_ctx", None)
+    _include_pi = _should_include_prompt_info(_chat_only, _dummy)
+    _pi = (
+        _prompt_info_payload(_pack_stats, llm_backend, chat_only=_chat_only)
+        if _include_pi
+        else None
+    )
+    if _log_stats or _dummy or _chat_only:
+        _log_packed_stats(_pack_stats, n_ctx=_n_ctx)
+
+    if _dummy:
+        _ms = round((time.perf_counter() - _t_pack0) * 1000, 2)
+        _msg = (
+            "[dummy LLM probe] Skipped generate_chat. "
+            f"Packed prompt: {_pack_stats['total_chars']} chars, "
+            f"{_pack_stats['total_utf8_bytes']} UTF-8 bytes, "
+            f"~{_pack_stats['est_tokens_approx']} est. tokens (chars/4), "
+            f"{_pack_stats['message_count']} messages, "
+            f"chars_by_role={_pack_stats['chars_by_role']!r}."
+        )
+        return LLMContextResult(
+            answer=_msg,
+            confidence=1.0,
+            reasoning_steps=["dummy_probe: no local inference"],
+            requires_confirmation=False,
+            source="dummy_probe",
+            latency_ms=_ms,
+            prompt_info=_pi,
+        )
+
+    t0 = time.perf_counter()
+    _tlim = timeout_override if timeout_override is not None else _llm_context_timeout_seconds()
+    _exec_tlim = _tlim
+    if _exec_tlim is None:
+        _exec_tlim = _unbounded_generate_cap_seconds()
+
+    def _do_generate():
+        return llm_backend.generate_chat(
+            messages,
+            max_tokens=_mt,
+            temperature=temperature,
+        )
+
+    raw = None
+    try:
+        if _exec_tlim is not None:
+            print(
+                f"[LLMContextReasoner] generate_chat (timeout={_exec_tlim:.0f}s)…",
+                flush=True,
+            )
+            pool = ThreadPoolExecutor(max_workers=1)
+            try:
+                fut = pool.submit(_do_generate)
+                raw = fut.result(timeout=_exec_tlim)
+            except FutureTimeout:
+                elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
+                print(
+                    f"[LLMContextReasoner] generate_chat timed out after "
+                    f"{elapsed_ms:.0f}ms (limit {_exec_tlim:.0f}s); continuing without "
+                    f"LLM answer. Raise HAROMA_LLM_CONTEXT_TIMEOUT_SEC or "
+                    f"HAROMA_LLM_MAX_GENERATE_SEC if loads are legitimately slow.",
+                    flush=True,
+                )
+                result = LLMContextResult.empty("llm_timeout")
+                result.latency_ms = elapsed_ms
+                result.prompt_info = _pi
+                return result
+            finally:
+                pool.shutdown(wait=False, cancel_futures=True)
+        else:
+            print(
+                "[LLMContextReasoner] generate_chat (no timeout — native decode can hang)…",
+                flush=True,
+            )
+            raw = _do_generate()
+    except Exception as exc:
+        elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
+        print(
+            f"[LLMContextReasoner] generate_chat error ({elapsed_ms:.0f}ms): {exc}",
+            flush=True,
+        )
+        result = LLMContextResult.empty("llm_error")
+        result.latency_ms = elapsed_ms
+        result.prompt_info = _pi
+        return result
+    elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
+
+    if _chat_only:
+        _plain = (raw or "").strip()
+        return LLMContextResult(
+            answer=_plain if _plain else None,
+            confidence=0.55,
+            reasoning_steps=[],
+            requires_confirmation=True,
+            source="chat_only",
+            latency_ms=elapsed_ms,
+            prompt_info=_pi,
+        )
+
+    result = parse_response(raw)
+    result.latency_ms = elapsed_ms
+    if _pi is not None:
+        result.prompt_info = _pi
+    return result

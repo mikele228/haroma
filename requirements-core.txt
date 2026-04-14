@@ -1,0 +1,19 @@
+# HaromaX6 — core dependencies (same as requirements.txt but without llama-cpp-python).
+# Local GGUF: pip install llama-cpp-python  (requires CMake/VS Build Tools on Windows)
+
+numpy
+torch
+opencv-python
+transformers
+sentence-transformers
+Pillow
+spacy
+faiss-cpu
+librosa
+soundfile
+open-clip-torch
+openai-whisper
+fastapi
+flask
+requests
+uvicorn

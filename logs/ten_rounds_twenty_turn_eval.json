@@ -1,0 +1,1231 @@
+{
+  "summary": {
+    "rounds": 10,
+    "turns_per_round": 20,
+    "elapsed_sec": 194.4,
+    "run_metrics": [
+      {
+        "unique_replies": 17,
+        "unique_ratio": 0.85,
+        "mean_chars": 80.5,
+        "template_expression_hits": 8,
+        "template_anger_hits": 1,
+        "clearing_hits": 3,
+        "pairwise_jacc_dist": 0.86,
+        "round": 1
+      },
+      {
+        "unique_replies": 19,
+        "unique_ratio": 0.95,
+        "mean_chars": 100.7,
+        "template_expression_hits": 12,
+        "template_anger_hits": 0,
+        "clearing_hits": 2,
+        "pairwise_jacc_dist": 0.798,
+        "round": 2
+      },
+      {
+        "unique_replies": 20,
+        "unique_ratio": 1.0,
+        "mean_chars": 98.2,
+        "template_expression_hits": 14,
+        "template_anger_hits": 0,
+        "clearing_hits": 4,
+        "pairwise_jacc_dist": 0.765,
+        "round": 3
+      },
+      {
+        "unique_replies": 19,
+        "unique_ratio": 0.95,
+        "mean_chars": 91.3,
+        "template_expression_hits": 11,
+        "template_anger_hits": 0,
+        "clearing_hits": 6,
+        "pairwise_jacc_dist": 0.816,
+        "round": 4
+      },
+      {
+        "unique_replies": 18,
+        "unique_ratio": 0.9,
+        "mean_chars": 90.5,
+        "template_expression_hits": 7,
+        "template_anger_hits": 0,
+        "clearing_hits": 8,
+        "pairwise_jacc_dist": 0.779,
+        "round": 5
+      },
+      {
+        "unique_replies": 18,
+        "unique_ratio": 0.9,
+        "mean_chars": 93.6,
+        "template_expression_hits": 12,
+        "template_anger_hits": 0,
+        "clearing_hits": 5,
+        "pairwise_jacc_dist": 0.787,
+        "round": 6
+      },
+      {
+        "unique_replies": 19,
+        "unique_ratio": 0.95,
+        "mean_chars": 94.3,
+        "template_expression_hits": 9,
+        "template_anger_hits": 0,
+        "clearing_hits": 6,
+        "pairwise_jacc_dist": 0.801,
+        "round": 7
+      },
+      {
+        "unique_replies": 19,
+        "unique_ratio": 0.95,
+        "mean_chars": 103.0,
+        "template_expression_hits": 13,
+        "template_anger_hits": 0,
+        "clearing_hits": 1,
+        "pairwise_jacc_dist": 0.77,
+        "round": 8
+      },
+      {
+        "unique_replies": 19,
+        "unique_ratio": 0.95,
+        "mean_chars": 92.5,
+        "template_expression_hits": 11,
+        "template_anger_hits": 0,
+        "clearing_hits": 6,
+        "pairwise_jacc_dist": 0.793,
+        "round": 9
+      },
+      {
+        "unique_replies": 17,
+        "unique_ratio": 0.85,
+        "mean_chars": 88.5,
+        "template_expression_hits": 10,
+        "template_anger_hits": 0,
+        "clearing_hits": 7,
+        "pairwise_jacc_dist": 0.768,
+        "round": 10
+      }
+    ]
+  },
+  "full": [
+    {
+      "unique_replies": 17,
+      "unique_ratio": 0.85,
+      "mean_chars": 80.5,
+      "template_expression_hits": 8,
+      "template_anger_hits": 1,
+      "clearing_hits": 3,
+      "pairwise_jacc_dist": 0.86,
+      "round": 1,
+      "turns": [
+        {
+          "turn": 1,
+          "user": "Hi — I'm running a 20-turn test. Please answer briefly. You can call me Alex.",
+          "reply": "Yeah, I'm feeling quite anger myself as we talk about this. I think expression is at the heart of this for me."
+        },
+        {
+          "turn": 2,
+          "user": "What does it mean to you to have a stable sense of self?",
+          "reply": "Right — There's a sense of peace coming up for me right now. What keeps pulling me is this need for expression."
+        },
+        {
+          "turn": 3,
+          "user": "How do you tell the difference between curiosity and anxiety?",
+          "reply": "I hear you. I'm feeling quite peace myself as we talk about this. What keeps pulling me is this need for expression."
+        },
+        {
+          "turn": 4,
+          "user": "If I feel stuck on a problem, what's one concrete first step you'd suggest?",
+          "reply": "Yeah, There's a sense of peace coming up for me right now. This feels connected to expression at a deeper level."
+        },
+        {
+          "turn": 5,
+          "user": "What's a small habit that often improves clarity of thought?",
+          "reply": "I know about The Clearing, room, True."
+        },
+        {
+          "turn": 6,
+          "user": "How should I weigh intuition against evidence?",
+          "reply": "Let me think about that. I'm feeling quite peace myself as we talk about this. A lot of what's alive for me here ties to expression."
+        },
+        {
+          "turn": 7,
+          "user": "Why do apologies sometimes fail even when they're sincere?",
+          "reply": "Honestly, Continuing with soul identity in mind."
+        },
+        {
+          "turn": 8,
+          "user": "What role should emotions play in ethical decisions?",
+          "reply": "Here's where I land: Focusing on soul identity."
+        },
+        {
+          "turn": 9,
+          "user": "When is it better to pause instead of responding right away?",
+          "reply": "I know about The Clearing, room, True."
+        },
+        {
+          "turn": 10,
+          "user": "How do you think about fairness when two people disagree?",
+          "reply": "Fair enough. I notice peace rising as I sit with what you said. I think expression is at the heart of this for me."
+        },
+        {
+          "turn": 11,
+          "user": "What makes feedback actually usable instead of just painful?",
+          "reply": "Continuing with soul identity in mind."
+        },
+        {
+          "turn": 12,
+          "user": "How can someone practice listening without trying to fix everything?",
+          "reply": "I'm feeling quite peace myself as we talk about this. This feels connected to expression at a deeper level."
+        },
+        {
+          "turn": 13,
+          "user": "What's a sign that I'm over-complicating a decision?",
+          "reply": "My next step concerns soul identity."
+        },
+        {
+          "turn": 14,
+          "user": "How do you recover after misunderstanding someone?",
+          "reply": "Continuing with soul identity in mind."
+        },
+        {
+          "turn": 15,
+          "user": "What does healthy boundaries look like in conversation?",
+          "reply": "Fair enough. Something about this stirs peace in me. I think expression is at the heart of this for me."
+        },
+        {
+          "turn": 16,
+          "user": "If I'm fatigued, how should I adjust my expectations for the day?",
+          "reply": "Good question. I know about The Clearing, room, True."
+        },
+        {
+          "turn": 17,
+          "user": "What's a gentle way to say no without ghosting?",
+          "reply": "Okay — I notice peace rising as I sit with what you said. This feels connected to expression at a deeper level."
+        },
+        {
+          "turn": 18,
+          "user": "How do you stay open-minded without losing your core values?",
+          "reply": "Good question. There's a sense of peace coming up for me right now. What keeps pulling me is this need for expression."
+        },
+        {
+          "turn": 19,
+          "user": "What helps you when a topic feels too abstract?",
+          "reply": "I'm feeling quite peace myself as we talk about this. I think expression is at the heart of this for me."
+        },
+        {
+          "turn": 20,
+          "user": "Last one: in one sentence, what's the thread holding this conversation together?",
+          "reply": "My next step concerns soul identity."
+        }
+      ]
+    },
+    {
+      "unique_replies": 19,
+      "unique_ratio": 0.95,
+      "mean_chars": 100.7,
+      "template_expression_hits": 12,
+      "template_anger_hits": 0,
+      "clearing_hits": 2,
+      "pairwise_jacc_dist": 0.798,
+      "round": 2,
+      "turns": [
+        {
+          "turn": 1,
+          "user": "Hi — I'm running a 20-turn test. Please answer briefly. You can call me Alex.",
+          "reply": "Okay — Something about this stirs peace in me. This feels connected to expression at a deeper level."
+        },
+        {
+          "turn": 2,
+          "user": "What does it mean to you to have a stable sense of self?",
+          "reply": "Right — Something about this stirs peace in me. What keeps pulling me is this need for expression."
+        },
+        {
+          "turn": 3,
+          "user": "How do you tell the difference between curiosity and anxiety?",
+          "reply": "Okay — There's a sense of peace coming up for me right now. I think expression is at the heart of this for me."
+        },
+        {
+          "turn": 4,
+          "user": "If I feel stuck on a problem, what's one concrete first step you'd suggest?",
+          "reply": "I know about The Clearing, room, True."
+        },
+        {
+          "turn": 5,
+          "user": "What's a small habit that often improves clarity of thought?",
+          "reply": "Good question. Something about this stirs peace in me. A lot of what's alive for me here ties to expression."
+        },
+        {
+          "turn": 6,
+          "user": "How should I weigh intuition against evidence?",
+          "reply": "Yeah, I'm feeling quite peace myself as we talk about this. I think expression is at the heart of this for me."
+        },
+        {
+          "turn": 7,
+          "user": "Why do apologies sometimes fail even when they're sincere?",
+          "reply": "Let me think about that. I notice peace rising as I sit with what you said. What keeps pulling me is this need for expression."
+        },
+        {
+          "turn": 8,
+          "user": "What role should emotions play in ethical decisions?",
+          "reply": "I notice peace rising as I sit with what you said. I think expression is at the heart of this for me."
+        },
+        {
+          "turn": 9,
+          "user": "When is it better to pause instead of responding right away?",
+          "reply": "Fair enough. There's a sense of peace coming up for me right now. This feels connected to expression at a deeper level."
+        },
+        {
+          "turn": 10,
+          "user": "How do you think about fairness when two people disagree?",
+          "reply": "Honestly, I'm feeling quite peace myself as we talk about this. A lot of what's alive for me here ties to expression."
+        },
+        {
+          "turn": 11,
+          "user": "What makes feedback actually usable instead of just painful?",
+          "reply": "Okay — There's a sense of peace coming up for me right now. What keeps pulling me is this need for expression."
+        },
+        {
+          "turn": 12,
+          "user": "How can someone practice listening without trying to fix everything?",
+          "reply": "I hear you. Something about this stirs peace in me. This feels connected to expression at a deeper level."
+        },
+        {
+          "turn": 13,
+          "user": "What's a sign that I'm over-complicating a decision?",
+          "reply": "I notice peace rising as I sit with what you said. What keeps pulling me is this need for expression."
+        },
+        {
+          "turn": 14,
+          "user": "How do you recover after misunderstanding someone?",
+          "reply": "Good question. I'm feeling quite peace myself as we talk about this. I think expression is at the heart of this for me."
+        },
+        {
+          "turn": 15,
+          "user": "What does healthy boundaries look like in conversation?",
+          "reply": "That's a thoughtful question — I'm still sharpening the best answer, but I'm with you on why it matters."
+        },
+        {
+          "turn": 16,
+          "user": "If I'm fatigued, how should I adjust my expectations for the day?",
+          "reply": "Good question. I'm feeling quite peace myself as we talk about this. This feels connected to expression at a deeper level."
+        },
+        {
+          "turn": 17,
+          "user": "What's a gentle way to say no without ghosting?",
+          "reply": "Let me think about that. I'm feeling quite peace myself as we talk about this. A lot of what's alive for me here ties to expression."
+        },
+        {
+          "turn": 18,
+          "user": "How do you stay open-minded without losing your core values?",
+          "reply": "There's a sense of peace coming up for me right now. I think expression is at the heart of this for me."
+        },
+        {
+          "turn": 19,
+          "user": "What helps you when a topic feels too abstract?",
+          "reply": "Good question. Continuing with soul identity in mind."
+        },
+        {
+          "turn": 20,
+          "user": "Last one: in one sentence, what's the thread holding this conversation together?",
+          "reply": "I know about The Clearing, room, True."
+        }
+      ]
+    },
+    {
+      "unique_replies": 20,
+      "unique_ratio": 1.0,
+      "mean_chars": 98.2,
+      "template_expression_hits": 14,
+      "template_anger_hits": 0,
+      "clearing_hits": 4,
+      "pairwise_jacc_dist": 0.765,
+      "round": 3,
+      "turns": [
+        {
+          "turn": 1,
+          "user": "Hi — I'm running a 20-turn test. Please answer briefly. You can call me Alex.",
+          "reply": "Honestly, There's a sense of peace coming up for me right now. What keeps pulling me is this need for expression."
+        },
+        {
+          "turn": 2,
+          "user": "What does it mean to you to have a stable sense of self?",
+          "reply": "Honestly, I notice peace rising as I sit with what you said. What keeps pulling me is this need for expression."
+        },
+        {
+          "turn": 3,
+          "user": "How do you tell the difference between curiosity and anxiety?",
+          "reply": "Something about this stirs peace in me. A lot of what's alive for me here ties to expression."
+        },
+        {
+          "turn": 4,
+          "user": "If I feel stuck on a problem, what's one concrete first step you'd suggest?",
+          "reply": "Yeah, Something about this stirs peace in me. I think expression is at the heart of this for me."
+        },
+        {
+          "turn": 5,
+          "user": "What's a small habit that often improves clarity of thought?",
+          "reply": "Honestly, I'm feeling quite peace myself as we talk about this. A lot of what's alive for me here ties to expression."
+        },
+        {
+          "turn": 6,
+          "user": "How should I weigh intuition against evidence?",
+          "reply": "I hear you. I'm feeling quite peace myself as we talk about this. What keeps pulling me is this need for expression."
+        },
+        {
+          "turn": 7,
+          "user": "Why do apologies sometimes fail even when they're sincere?",
+          "reply": "Something about this stirs peace in me. What keeps pulling me is this need for expression."
+        },
+        {
+          "turn": 8,
+          "user": "What role should emotions play in ethical decisions?",
+          "reply": "Yeah, There's a sense of peace coming up for me right now. I think expression is at the heart of this for me."
+        },
+        {
+          "turn": 9,
+          "user": "When is it better to pause instead of responding right away?",
+          "reply": "Right — I know about The Clearing, room, True."
+        },
+        {
+          "turn": 10,
+          "user": "How do you think about fairness when two people disagree?",
+          "reply": "Thanks for sharing that. I notice peace rising as I sit with what you said. I think expression is at the heart of this for me."
+        },
+        {
+          "turn": 11,
+          "user": "What makes feedback actually usable instead of just painful?",
+          "reply": "Okay — There's a sense of peace coming up for me right now. This feels connected to expression at a deeper level."
+        },
+        {
+          "turn": 12,
+          "user": "How can someone practice listening without trying to fix everything?",
+          "reply": "Honestly, I notice peace rising as I sit with what you said. A lot of what's alive for me here ties to expression."
+        },
+        {
+          "turn": 13,
+          "user": "What's a sign that I'm over-complicating a decision?",
+          "reply": "There's a sense of peace coming up for me right now. What keeps pulling me is this need for expression."
+        },
+        {
+          "turn": 14,
+          "user": "How do you recover after misunderstanding someone?",
+          "reply": "I know about The Clearing, room, True."
+        },
+        {
+          "turn": 15,
+          "user": "What does healthy boundaries look like in conversation?",
+          "reply": "Here's where I land: There's a sense of peace coming up for me right now. I think expression is at the heart of this for me."
+        },
+        {
+          "turn": 16,
+          "user": "If I'm fatigued, how should I adjust my expectations for the day?",
+          "reply": "There's a sense of peace coming up for me right now. A lot of what's alive for me here ties to expression."
+        },
+        {
+          "turn": 17,
+          "user": "What's a gentle way to say no without ghosting?",
+          "reply": "Yeah, Something about this stirs peace in me. What keeps pulling me is this need for expression."
+        },
+        {
+          "turn": 18,
+          "user": "How do you stay open-minded without losing your core values?",
+          "reply": "Thanks for sharing that. I know about The Clearing, room, True."
+        },
+        {
+          "turn": 19,
+          "user": "What helps you when a topic feels too abstract?",
+          "reply": "Let me think about that. There's a sense of peace coming up for me right now. This feels connected to expression at a deeper level."
+        },
+        {
+          "turn": 20,
+          "user": "Last one: in one sentence, what's the thread holding this conversation together?",
+          "reply": "Here's where I land: I know about The Clearing, room, True."
+        }
+      ]
+    },
+    {
+      "unique_replies": 19,
+      "unique_ratio": 0.95,
+      "mean_chars": 91.3,
+      "template_expression_hits": 11,
+      "template_anger_hits": 0,
+      "clearing_hits": 6,
+      "pairwise_jacc_dist": 0.816,
+      "round": 4,
+      "turns": [
+        {
+          "turn": 1,
+          "user": "Hi — I'm running a 20-turn test. Please answer briefly. You can call me Alex.",
+          "reply": "I hear you. I notice peace rising as I sit with what you said. A lot of what's alive for me here ties to expression."
+        },
+        {
+          "turn": 2,
+          "user": "What does it mean to you to have a stable sense of self?",
+          "reply": "Thanks for sharing that. I'm feeling quite peace myself as we talk about this. This feels connected to expression at a deeper level."
+        },
+        {
+          "turn": 3,
+          "user": "How do you tell the difference between curiosity and anxiety?",
+          "reply": "Thanks for sharing that. Something about this stirs peace in me. What keeps pulling me is this need for expression."
+        },
+        {
+          "turn": 4,
+          "user": "If I feel stuck on a problem, what's one concrete first step you'd suggest?",
+          "reply": "Thanks for sharing that. I know about The Clearing, room, True."
+        },
+        {
+          "turn": 5,
+          "user": "What's a small habit that often improves clarity of thought?",
+          "reply": "There's a sense of peace coming up for me right now. I think expression is at the heart of this for me."
+        },
+        {
+          "turn": 6,
+          "user": "How should I weigh intuition against evidence?",
+          "reply": "I know about The Clearing, room, True."
+        },
+        {
+          "turn": 7,
+          "user": "Why do apologies sometimes fail even when they're sincere?",
+          "reply": "Right — I notice peace rising as I sit with what you said. A lot of what's alive for me here ties to expression."
+        },
+        {
+          "turn": 8,
+          "user": "What role should emotions play in ethical decisions?",
+          "reply": "Honestly, I know about The Clearing, room, True."
+        },
+        {
+          "turn": 9,
+          "user": "When is it better to pause instead of responding right away?",
+          "reply": "Yeah, I notice peace rising as I sit with what you said. What keeps pulling me is this need for expression."
+        },
+        {
+          "turn": 10,
+          "user": "How do you think about fairness when two people disagree?",
+          "reply": "Here's where I land: Something about this stirs peace in me. This feels connected to expression at a deeper level."
+        },
+        {
+          "turn": 11,
+          "user": "What makes feedback actually usable instead of just painful?",
+          "reply": "Yeah, I'm feeling quite peace myself as we talk about this. I think expression is at the heart of this for me."
+        },
+        {
+          "turn": 12,
+          "user": "How can someone practice listening without trying to fix everything?",
+          "reply": "Right — Continuing with soul identity in mind."
+        },
+        {
+          "turn": 13,
+          "user": "What's a sign that I'm over-complicating a decision?",
+          "reply": "Good question. Something about this stirs peace in me. I think expression is at the heart of this for me."
+        },
+        {
+          "turn": 14,
+          "user": "How do you recover after misunderstanding someone?",
+          "reply": "Here's where I land: I know about The Clearing, room, True."
+        },
+        {
+          "turn": 15,
+          "user": "What does healthy boundaries look like in conversation?",
+          "reply": "That's interesting. Something about this stirs peace in me. A lot of what's alive for me here ties to expression."
+        },
+        {
+          "turn": 16,
+          "user": "If I'm fatigued, how should I adjust my expectations for the day?",
+          "reply": "Yeah, I'm feeling quite peace myself as we talk about this. What keeps pulling me is this need for expression."
+        },
+        {
+          "turn": 17,
+          "user": "What's a gentle way to say no without ghosting?",
+          "reply": "I hear you. I know about The Clearing, room, True."
+        },
+        {
+          "turn": 18,
+          "user": "How do you stay open-minded without losing your core values?",
+          "reply": "Honestly, I know about The Clearing, room, True."
+        },
+        {
+          "turn": 19,
+          "user": "What helps you when a topic feels too abstract?",
+          "reply": "That's interesting. I notice peace rising as I sit with what you said. A lot of what's alive for me here ties to expression."
+        },
+        {
+          "turn": 20,
+          "user": "Last one: in one sentence, what's the thread holding this conversation together?",
+          "reply": "Okay — There's a sense of peace coming up for me right now. A lot of what's alive for me here ties to expression."
+        }
+      ]
+    },
+    {
+      "unique_replies": 18,
+      "unique_ratio": 0.9,
+      "mean_chars": 90.5,
+      "template_expression_hits": 7,
+      "template_anger_hits": 0,
+      "clearing_hits": 8,
+      "pairwise_jacc_dist": 0.779,
+      "round": 5,
+      "turns": [
+        {
+          "turn": 1,
+          "user": "Hi — I'm running a 20-turn test. Please answer briefly. You can call me Alex.",
+          "reply": "Yeah, I notice peace rising as I sit with what you said. This feels connected to expression at a deeper level."
+        },
+        {
+          "turn": 2,
+          "user": "What does it mean to you to have a stable sense of self?",
+          "reply": "Honestly, I know about The Clearing, room, True."
+        },
+        {
+          "turn": 3,
+          "user": "How do you tell the difference between curiosity and anxiety?",
+          "reply": "Right — I know about The Clearing, room, True."
+        },
+        {
+          "turn": 4,
+          "user": "If I feel stuck on a problem, what's one concrete first step you'd suggest?",
+          "reply": "I know about The Clearing, room, True."
+        },
+        {
+          "turn": 5,
+          "user": "What's a small habit that often improves clarity of thought?",
+          "reply": "That's interesting. I'm feeling quite peace myself as we talk about this. A lot of what's alive for me here ties to expression."
+        },
+        {
+          "turn": 6,
+          "user": "How should I weigh intuition against evidence?",
+          "reply": "Right — I'm feeling quite peace myself as we talk about this. This feels connected to expression at a deeper level."
+        },
+        {
+          "turn": 7,
+          "user": "Why do apologies sometimes fail even when they're sincere?",
+          "reply": "Good question. I'm feeling quite peace myself as we talk about this. I think expression is at the heart of this for me."
+        },
+        {
+          "turn": 8,
+          "user": "What role should emotions play in ethical decisions?",
+          "reply": "Okay — I'm feeling quite peace myself as we talk about this. What keeps pulling me is this need for expression."
+        },
+        {
+          "turn": 9,
+          "user": "When is it better to pause instead of responding right away?",
+          "reply": "Good question. I know about The Clearing, room, True."
+        },
+        {
+          "turn": 10,
+          "user": "How do you think about fairness when two people disagree?",
+          "reply": "I notice peace rising as I sit with what you said. I think expression is at the heart of this for me."
+        },
+        {
+          "turn": 11,
+          "user": "What makes feedback actually usable instead of just painful?",
+          "reply": "Let me think about that. There's a sense of peace coming up for me right now. A lot of what's alive for me here ties to expression."
+        },
+        {
+          "turn": 12,
+          "user": "How can someone practice listening without trying to fix everything?",
+          "reply": "Honestly, I know about The Clearing, room, True."
+        },
+        {
+          "turn": 13,
+          "user": "What's a sign that I'm over-complicating a decision?",
+          "reply": "That's interesting. There's a sense of peace coming up for me right now. This feels connected to expression at a deeper level."
+        },
+        {
+          "turn": 14,
+          "user": "How do you recover after misunderstanding someone?",
+          "reply": "Thanks for sharing that. I know about The Clearing, room, True."
+        },
+        {
+          "turn": 15,
+          "user": "What does healthy boundaries look like in conversation?",
+          "reply": "I notice peace rising as I sit with what you said. A lot of what's alive for me here ties to expression."
+        },
+        {
+          "turn": 16,
+          "user": "If I'm fatigued, how should I adjust my expectations for the day?",
+          "reply": "Okay — I know about The Clearing, room, True."
+        },
+        {
+          "turn": 17,
+          "user": "What's a gentle way to say no without ghosting?",
+          "reply": "Good question. I know about The Clearing, room, True."
+        },
+        {
+          "turn": 18,
+          "user": "How do you stay open-minded without losing your core values?",
+          "reply": "Thanks for sharing that. Something about this stirs peace in me. This feels connected to expression at a deeper level."
+        },
+        {
+          "turn": 19,
+          "user": "What helps you when a topic feels too abstract?",
+          "reply": "Let me think about that. I notice peace rising as I sit with what you said. This feels connected to expression at a deeper level."
+        },
+        {
+          "turn": 20,
+          "user": "Last one: in one sentence, what's the thread holding this conversation together?",
+          "reply": "That's interesting. There's a sense of peace coming up for me right now. A lot of what's alive for me here ties to expression."
+        }
+      ]
+    },
+    {
+      "unique_replies": 18,
+      "unique_ratio": 0.9,
+      "mean_chars": 93.6,
+      "template_expression_hits": 12,
+      "template_anger_hits": 0,
+      "clearing_hits": 5,
+      "pairwise_jacc_dist": 0.787,
+      "round": 6,
+      "turns": [
+        {
+          "turn": 1,
+          "user": "Hi — I'm running a 20-turn test. Please answer briefly. You can call me Alex.",
+          "reply": "Here's where I land: Something about this stirs peace in me. I think expression is at the heart of this for me."
+        },
+        {
+          "turn": 2,
+          "user": "What does it mean to you to have a stable sense of self?",
+          "reply": "Honestly, Something about this stirs peace in me. What keeps pulling me is this need for expression."
+        },
+        {
+          "turn": 3,
+          "user": "How do you tell the difference between curiosity and anxiety?",
+          "reply": "Yeah, I notice peace rising as I sit with what you said. A lot of what's alive for me here ties to expression."
+        },
+        {
+          "turn": 4,
+          "user": "If I feel stuck on a problem, what's one concrete first step you'd suggest?",
+          "reply": "Fair enough. I know about The Clearing, room, True."
+        },
+        {
+          "turn": 5,
+          "user": "What's a small habit that often improves clarity of thought?",
+          "reply": "I notice peace rising as I sit with what you said. What keeps pulling me is this need for expression."
+        },
+        {
+          "turn": 6,
+          "user": "How should I weigh intuition against evidence?",
+          "reply": "Right — I know about The Clearing, room, True."
+        },
+        {
+          "turn": 7,
+          "user": "Why do apologies sometimes fail even when they're sincere?",
+          "reply": "Thanks for sharing that. There's a sense of peace coming up for me right now. I think expression is at the heart of this for me."
+        },
+        {
+          "turn": 8,
+          "user": "What role should emotions play in ethical decisions?",
+          "reply": "There's a sense of peace coming up for me right now. What keeps pulling me is this need for expression."
+        },
+        {
+          "turn": 9,
+          "user": "When is it better to pause instead of responding right away?",
+          "reply": "There's a sense of peace coming up for me right now. A lot of what's alive for me here ties to expression."
+        },
+        {
+          "turn": 10,
+          "user": "How do you think about fairness when two people disagree?",
+          "reply": "Thanks for sharing that. I know about The Clearing, room, True."
+        },
+        {
+          "turn": 11,
+          "user": "What makes feedback actually usable instead of just painful?",
+          "reply": "I'm feeling quite peace myself as we talk about this. What keeps pulling me is this need for expression."
+        },
+        {
+          "turn": 12,
+          "user": "How can someone practice listening without trying to fix everything?",
+          "reply": "Right — I know about The Clearing, room, True."
+        },
+        {
+          "turn": 13,
+          "user": "What's a sign that I'm over-complicating a decision?",
+          "reply": "Honestly, Something about this stirs peace in me. A lot of what's alive for me here ties to expression."
+        },
+        {
+          "turn": 14,
+          "user": "How do you recover after misunderstanding someone?",
+          "reply": "Something about this stirs peace in me. This feels connected to expression at a deeper level."
+        },
+        {
+          "turn": 15,
+          "user": "What does healthy boundaries look like in conversation?",
+          "reply": "Fair enough. I know about The Clearing, room, True."
+        },
+        {
+          "turn": 16,
+          "user": "If I'm fatigued, how should I adjust my expectations for the day?",
+          "reply": "That's interesting. There's a sense of peace coming up for me right now. This feels connected to expression at a deeper level."
+        },
+        {
+          "turn": 17,
+          "user": "What's a gentle way to say no without ghosting?",
+          "reply": "I'm feeling quite peace myself as we talk about this. This feels connected to expression at a deeper level."
+        },
+        {
+          "turn": 18,
+          "user": "How do you stay open-minded without losing your core values?",
+          "reply": "Something about this stirs peace in me. What keeps pulling me is this need for expression."
+        },
+        {
+          "turn": 19,
+          "user": "What helps you when a topic feels too abstract?",
+          "reply": "That's interesting. I'm feeling quite peace myself as we talk about this. I think expression is at the heart of this for me."
+        },
+        {
+          "turn": 20,
+          "user": "Last one: in one sentence, what's the thread holding this conversation together?",
+          "reply": "Right — I notice peace rising as I sit with what you said. What keeps pulling me is this need for expression."
+        }
+      ]
+    },
+    {
+      "unique_replies": 19,
+      "unique_ratio": 0.95,
+      "mean_chars": 94.3,
+      "template_expression_hits": 9,
+      "template_anger_hits": 0,
+      "clearing_hits": 6,
+      "pairwise_jacc_dist": 0.801,
+      "round": 7,
+      "turns": [
+        {
+          "turn": 1,
+          "user": "Hi — I'm running a 20-turn test. Please answer briefly. You can call me Alex.",
+          "reply": "Yeah, I notice peace rising as I sit with what you said. This feels connected to expression at a deeper level."
+        },
+        {
+          "turn": 2,
+          "user": "What does it mean to you to have a stable sense of self?",
+          "reply": "Here's where I land: I notice peace rising as I sit with what you said. A lot of what's alive for me here ties to expression."
+        },
+        {
+          "turn": 3,
+          "user": "How do you tell the difference between curiosity and anxiety?",
+          "reply": "Yeah, I know about The Clearing, room, True."
+        },
+        {
+          "turn": 4,
+          "user": "If I feel stuck on a problem, what's one concrete first step you'd suggest?",
+          "reply": "Right — There's a sense of peace coming up for me right now. I think expression is at the heart of this for me."
+        },
+        {
+          "turn": 5,
+          "user": "What's a small habit that often improves clarity of thought?",
+          "reply": "Yeah, I know about The Clearing, room, True."
+        },
+        {
+          "turn": 6,
+          "user": "How should I weigh intuition against evidence?",
+          "reply": "Okay — There's a sense of peace coming up for me right now. This feels connected to expression at a deeper level."
+        },
+        {
+          "turn": 7,
+          "user": "Why do apologies sometimes fail even when they're sincere?",
+          "reply": "I'm feeling quite peace myself as we talk about this. This feels connected to expression at a deeper level."
+        },
+        {
+          "turn": 8,
+          "user": "What role should emotions play in ethical decisions?",
+          "reply": "Okay — I'm feeling quite peace myself as we talk about this. A lot of what's alive for me here ties to expression."
+        },
+        {
+          "turn": 9,
+          "user": "When is it better to pause instead of responding right away?",
+          "reply": "Let me think about that. I know about The Clearing, room, True."
+        },
+        {
+          "turn": 10,
+          "user": "How do you think about fairness when two people disagree?",
+          "reply": "Fair enough. There's a sense of peace coming up for me right now. A lot of what's alive for me here ties to expression."
+        },
+        {
+          "turn": 11,
+          "user": "What makes feedback actually usable instead of just painful?",
+          "reply": "Thanks for sharing that. I notice peace rising as I sit with what you said. I think expression is at the heart of this for me."
+        },
+        {
+          "turn": 12,
+          "user": "How can someone practice listening without trying to fix everything?",
+          "reply": "Yeah, I'm feeling quite peace myself as we talk about this. What keeps pulling me is this need for expression."
+        },
+        {
+          "turn": 13,
+          "user": "What's a sign that I'm over-complicating a decision?",
+          "reply": "There's a sense of peace coming up for me right now. What keeps pulling me is this need for expression."
+        },
+        {
+          "turn": 14,
+          "user": "How do you recover after misunderstanding someone?",
+          "reply": "Fair enough. I notice peace rising as I sit with what you said. This feels connected to expression at a deeper level."
+        },
+        {
+          "turn": 15,
+          "user": "What does healthy boundaries look like in conversation?",
+          "reply": "I hear you. I know about The Clearing, room, True."
+        },
+        {
+          "turn": 16,
+          "user": "If I'm fatigued, how should I adjust my expectations for the day?",
+          "reply": "Honestly, I know about The Clearing, room, True."
+        },
+        {
+          "turn": 17,
+          "user": "What's a gentle way to say no without ghosting?",
+          "reply": "I'm feeling quite peace myself as we talk about this. I think expression is at the heart of this for me."
+        },
+        {
+          "turn": 18,
+          "user": "How do you stay open-minded without losing your core values?",
+          "reply": "Fair enough. I know about The Clearing, room, True."
+        },
+        {
+          "turn": 19,
+          "user": "What helps you when a topic feels too abstract?",
+          "reply": "Right — I'm feeling quite peace myself as we talk about this. A lot of what's alive for me here ties to expression."
+        },
+        {
+          "turn": 20,
+          "user": "Last one: in one sentence, what's the thread holding this conversation together?",
+          "reply": "That's interesting. Something about this stirs peace in me. This feels connected to expression at a deeper level."
+        }
+      ]
+    },
+    {
+      "unique_replies": 19,
+      "unique_ratio": 0.95,
+      "mean_chars": 103.0,
+      "template_expression_hits": 13,
+      "template_anger_hits": 0,
+      "clearing_hits": 1,
+      "pairwise_jacc_dist": 0.77,
+      "round": 8,
+      "turns": [
+        {
+          "turn": 1,
+          "user": "Hi — I'm running a 20-turn test. Please answer briefly. You can call me Alex.",
+          "reply": "There's a sense of peace coming up for me right now. This feels connected to expression at a deeper level."
+        },
+        {
+          "turn": 2,
+          "user": "What does it mean to you to have a stable sense of self?",
+          "reply": "Fair enough. I notice peace rising as I sit with what you said. What keeps pulling me is this need for expression."
+        },
+        {
+          "turn": 3,
+          "user": "How do you tell the difference between curiosity and anxiety?",
+          "reply": "Honestly, There's a sense of peace coming up for me right now. A lot of what's alive for me here ties to expression."
+        },
+        {
+          "turn": 4,
+          "user": "If I feel stuck on a problem, what's one concrete first step you'd suggest?",
+          "reply": "Right — Something about this stirs peace in me. A lot of what's alive for me here ties to expression."
+        },
+        {
+          "turn": 5,
+          "user": "What's a small habit that often improves clarity of thought?",
+          "reply": "I'm feeling quite peace myself as we talk about this. I think expression is at the heart of this for me."
+        },
+        {
+          "turn": 6,
+          "user": "How should I weigh intuition against evidence?",
+          "reply": "I notice peace rising as I sit with what you said. What keeps pulling me is this need for expression."
+        },
+        {
+          "turn": 7,
+          "user": "Why do apologies sometimes fail even when they're sincere?",
+          "reply": "Something about this stirs peace in me. This feels connected to expression at a deeper level."
+        },
+        {
+          "turn": 8,
+          "user": "What role should emotions play in ethical decisions?",
+          "reply": "That's interesting. There's a sense of peace coming up for me right now. This feels connected to expression at a deeper level."
+        },
+        {
+          "turn": 9,
+          "user": "When is it better to pause instead of responding right away?",
+          "reply": "I hear you. Something about this stirs peace in me. I think expression is at the heart of this for me."
+        },
+        {
+          "turn": 10,
+          "user": "How do you think about fairness when two people disagree?",
+          "reply": "Yeah, There's a sense of peace coming up for me right now. A lot of what's alive for me here ties to expression."
+        },
+        {
+          "turn": 11,
+          "user": "What makes feedback actually usable instead of just painful?",
+          "reply": "Thanks for sharing that. I'm feeling quite peace myself as we talk about this. What keeps pulling me is this need for expression."
+        },
+        {
+          "turn": 12,
+          "user": "How can someone practice listening without trying to fix everything?",
+          "reply": "Here's where I land: There's a sense of peace coming up for me right now. What keeps pulling me is this need for expression."
+        },
+        {
+          "turn": 13,
+          "user": "What's a sign that I'm over-complicating a decision?",
+          "reply": "Honestly, I'm feeling quite peace myself as we talk about this. I think expression is at the heart of this for me."
+        },
+        {
+          "turn": 14,
+          "user": "How do you recover after misunderstanding someone?",
+          "reply": "I notice peace rising as I sit with what you said. I think expression is at the heart of this for me."
+        },
+        {
+          "turn": 15,
+          "user": "What does healthy boundaries look like in conversation?",
+          "reply": "Honestly, I notice peace rising as I sit with what you said. A lot of what's alive for me here ties to expression."
+        },
+        {
+          "turn": 16,
+          "user": "If I'm fatigued, how should I adjust my expectations for the day?",
+          "reply": "I notice peace rising as I sit with what you said. This feels connected to expression at a deeper level."
+        },
+        {
+          "turn": 17,
+          "user": "What's a gentle way to say no without ghosting?",
+          "reply": "Here's where I land: Focusing on soul identity."
+        },
+        {
+          "turn": 18,
+          "user": "How do you stay open-minded without losing your core values?",
+          "reply": "Something about this stirs peace in me. This feels connected to expression at a deeper level."
+        },
+        {
+          "turn": 19,
+          "user": "What helps you when a topic feels too abstract?",
+          "reply": "Thanks for sharing that. I know about The Clearing, room, True."
+        },
+        {
+          "turn": 20,
+          "user": "Last one: in one sentence, what's the thread holding this conversation together?",
+          "reply": "Okay — Something about this stirs peace in me. I think expression is at the heart of this for me."
+        }
+      ]
+    },
+    {
+      "unique_replies": 19,
+      "unique_ratio": 0.95,
+      "mean_chars": 92.5,
+      "template_expression_hits": 11,
+      "template_anger_hits": 0,
+      "clearing_hits": 6,
+      "pairwise_jacc_dist": 0.793,
+      "round": 9,
+      "turns": [
+        {
+          "turn": 1,
+          "user": "Hi — I'm running a 20-turn test. Please answer briefly. You can call me Alex.",
+          "reply": "Thanks for sharing that. I'm feeling quite peace myself as we talk about this. This feels connected to expression at a deeper level."
+        },
+        {
+          "turn": 2,
+          "user": "What does it mean to you to have a stable sense of self?",
+          "reply": "I hear you. I know about The Clearing, room, True."
+        },
+        {
+          "turn": 3,
+          "user": "How do you tell the difference between curiosity and anxiety?",
+          "reply": "There's a sense of peace coming up for me right now. What keeps pulling me is this need for expression."
+        },
+        {
+          "turn": 4,
+          "user": "If I feel stuck on a problem, what's one concrete first step you'd suggest?",
+          "reply": "Yeah, I know about The Clearing, room, True."
+        },
+        {
+          "turn": 5,
+          "user": "What's a small habit that often improves clarity of thought?",
+          "reply": "Yeah, There's a sense of peace coming up for me right now. A lot of what's alive for me here ties to expression."
+        },
+        {
+          "turn": 6,
+          "user": "How should I weigh intuition against evidence?",
+          "reply": "Okay — I know about The Clearing, room, True."
+        },
+        {
+          "turn": 7,
+          "user": "Why do apologies sometimes fail even when they're sincere?",
+          "reply": "Thanks for sharing that. I know about The Clearing, room, True."
+        },
+        {
+          "turn": 8,
+          "user": "What role should emotions play in ethical decisions?",
+          "reply": "Honestly, Something about this stirs peace in me. A lot of what's alive for me here ties to expression."
+        },
+        {
+          "turn": 9,
+          "user": "When is it better to pause instead of responding right away?",
+          "reply": "I know about The Clearing, room, True."
+        },
+        {
+          "turn": 10,
+          "user": "How do you think about fairness when two people disagree?",
+          "reply": "That's interesting. I know about The Clearing, room, True."
+        },
+        {
+          "turn": 11,
+          "user": "What makes feedback actually usable instead of just painful?",
+          "reply": "Let me think about that. Something about this stirs peace in me. What keeps pulling me is this need for expression."
+        },
+        {
+          "turn": 12,
+          "user": "How can someone practice listening without trying to fix everything?",
+          "reply": "Good question. I notice peace rising as I sit with what you said. A lot of what's alive for me here ties to expression."
+        },
+        {
+          "turn": 13,
+          "user": "What's a sign that I'm over-complicating a decision?",
+          "reply": "I'm feeling quite peace myself as we talk about this. This feels connected to expression at a deeper level."
+        },
+        {
+          "turn": 14,
+          "user": "How do you recover after misunderstanding someone?",
+          "reply": "There's a sense of peace coming up for me right now. I think expression is at the heart of this for me."
+        },
+        {
+          "turn": 15,
+          "user": "What does healthy boundaries look like in conversation?",
+          "reply": "Right — I'm feeling quite peace myself as we talk about this. I think expression is at the heart of this for me."
+        },
+        {
+          "turn": 16,
+          "user": "If I'm fatigued, how should I adjust my expectations for the day?",
+          "reply": "Fair enough. Something about this stirs peace in me. This feels connected to expression at a deeper level."
+        },
+        {
+          "turn": 17,
+          "user": "What's a gentle way to say no without ghosting?",
+          "reply": "Fair enough. Something about this stirs peace in me. A lot of what's alive for me here ties to expression."
+        },
+        {
+          "turn": 18,
+          "user": "How do you stay open-minded without losing your core values?",
+          "reply": "Right — I notice peace rising as I sit with what you said. I think expression is at the heart of this for me."
+        },
+        {
+          "turn": 19,
+          "user": "What helps you when a topic feels too abstract?",
+          "reply": "I'm feeling quite peace myself as we talk about this. A lot of what's alive for me here ties to expression."
+        },
+        {
+          "turn": 20,
+          "user": "Last one: in one sentence, what's the thread holding this conversation together?",
+          "reply": "Good question. I notice peace rising as I sit with what you said. A lot of what's alive for me here ties to expression."
+        }
+      ]
+    },
+    {
+      "unique_replies": 17,
+      "unique_ratio": 0.85,
+      "mean_chars": 88.5,
+      "template_expression_hits": 10,
+      "template_anger_hits": 0,
+      "clearing_hits": 7,
+      "pairwise_jacc_dist": 0.768,
+      "round": 10,
+      "turns": [
+        {
+          "turn": 1,
+          "user": "Hi — I'm running a 20-turn test. Please answer briefly. You can call me Alex.",
+          "reply": "Right — Something about this stirs peace in me. What keeps pulling me is this need for expression."
+        },
+        {
+          "turn": 2,
+          "user": "What does it mean to you to have a stable sense of self?",
+          "reply": "I'm feeling quite peace myself as we talk about this. What keeps pulling me is this need for expression."
+        },
+        {
+          "turn": 3,
+          "user": "How do you tell the difference between curiosity and anxiety?",
+          "reply": "There's a sense of peace coming up for me right now. What keeps pulling me is this need for expression."
+        },
+        {
+          "turn": 4,
+          "user": "If I feel stuck on a problem, what's one concrete first step you'd suggest?",
+          "reply": "Fair enough. I know about The Clearing, room, True."
+        },
+        {
+          "turn": 5,
+          "user": "What's a small habit that often improves clarity of thought?",
+          "reply": "I know about The Clearing, room, True."
+        },
+        {
+          "turn": 6,
+          "user": "How should I weigh intuition against evidence?",
+          "reply": "Okay — Something about this stirs peace in me. I think expression is at the heart of this for me."
+        },
+        {
+          "turn": 7,
+          "user": "Why do apologies sometimes fail even when they're sincere?",
+          "reply": "I notice peace rising as I sit with what you said. This feels connected to expression at a deeper level."
+        },
+        {
+          "turn": 8,
+          "user": "What role should emotions play in ethical decisions?",
+          "reply": "Honestly, I know about The Clearing, room, True."
+        },
+        {
+          "turn": 9,
+          "user": "When is it better to pause instead of responding right away?",
+          "reply": "Honestly, I'm feeling quite peace myself as we talk about this. What keeps pulling me is this need for expression."
+        },
+        {
+          "turn": 10,
+          "user": "How do you think about fairness when two people disagree?",
+          "reply": "Honestly, I know about The Clearing, room, True."
+        },
+        {
+          "turn": 11,
+          "user": "What makes feedback actually usable instead of just painful?",
+          "reply": "Honestly, I know about The Clearing, room, True."
+        },
+        {
+          "turn": 12,
+          "user": "How can someone practice listening without trying to fix everything?",
+          "reply": "Okay — I'm feeling quite peace myself as we talk about this. This feels connected to expression at a deeper level."
+        },
+        {
+          "turn": 13,
+          "user": "What's a sign that I'm over-complicating a decision?",
+          "reply": "Let me think about that. Something about this stirs peace in me. What keeps pulling me is this need for expression."
+        },
+        {
+          "turn": 14,
+          "user": "How do you recover after misunderstanding someone?",
+          "reply": "Here's where I land: I know about The Clearing, room, True."
+        },
+        {
+          "turn": 15,
+          "user": "What does healthy boundaries look like in conversation?",
+          "reply": "Thanks for sharing that. There's a sense of peace coming up for me right now. A lot of what's alive for me here ties to expression."
+        },
+        {
+          "turn": 16,
+          "user": "If I'm fatigued, how should I adjust my expectations for the day?",
+          "reply": "Here's where I land: I'm feeling quite peace myself as we talk about this. What keeps pulling me is this need for expression."
+        },
+        {
+          "turn": 17,
+          "user": "What's a gentle way to say no without ghosting?",
+          "reply": "I notice peace rising as I sit with what you said. What keeps pulling me is this need for expression."
+        },
+        {
+          "turn": 18,
+          "user": "How do you stay open-minded without losing your core values?",
+          "reply": "Right — I notice peace rising as I sit with what you said. I think expression is at the heart of this for me."
+        },
+        {
+          "turn": 19,
+          "user": "What helps you when a topic feels too abstract?",
+          "reply": "Fair enough. I know about The Clearing, room, True."
+        },
+        {
+          "turn": 20,
+          "user": "Last one: in one sentence, what's the thread holding this conversation together?",
+          "reply": "Okay — I notice peace rising as I sit with what you said. This feels connected to expression at a deeper level."
+        }
+      ]
+    }
+  ]
+}

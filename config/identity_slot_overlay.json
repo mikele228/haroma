@@ -1,0 +1,15 @@
+{
+  "essence_name": {
+    "tokens": ["name", "called"],
+    "phrases": [
+      "who are you",
+      "what is your name",
+      "what's your name",
+      "whats your name"
+    ]
+  },
+  "birth": {
+    "tokens": ["old", "age", "born", "birth"],
+    "phrases": ["how old are you"]
+  }
+}

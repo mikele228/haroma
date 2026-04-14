@@ -1,0 +1,11 @@
+{
+  "turns": 2,
+  "latency_mean_sec": 11.016,
+  "latency_min_sec": 5.647,
+  "latency_max_sec": 16.386,
+  "latency_p50_sec": 5.647,
+  "latency_p95_sec": 5.647,
+  "assistant_turns_with_question": 0,
+  "assistant_question_rate": 0.0,
+  "output_file": "C:\\Project\\HaromaX6\\logs\\conv_smoke.jsonl"
+}

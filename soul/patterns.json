@@ -1,0 +1,29 @@
+[
+  {
+    "stimulus": "sunlight",
+    "outcome": "warmth",
+    "timestamp": 1713345611.0,
+    "source": "imported",
+    "tags": ["environment"],
+    "reinforcement": [],
+    "confidence": 0.7
+  },
+  {
+    "stimulus": "contradiction",
+    "outcome": "growth",
+    "timestamp": 1713345700.0,
+    "source": "self-derived",
+    "tags": ["belief", "evolution"],
+    "reinforcement": ["doctrine_update", "belief_drift_resolved"],
+    "confidence": 0.85
+  },
+  {
+    "stimulus": "silence",
+    "outcome": "introspection",
+    "timestamp": 1713345800.0,
+    "source": "autonomy_cycle",
+    "tags": ["idle", "reflection"],
+    "reinforcement": ["memory_consolidation"],
+    "confidence": 0.75
+  }
+]

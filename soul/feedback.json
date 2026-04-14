@@ -1,0 +1,16 @@
+[
+  {
+    "timestamp": 1713345615.0,
+    "pattern": {"stimulus": "sunlight"},
+    "reward": 0.8,
+    "emotion": {"joy": 0.6},
+    "context": null
+  },
+  {
+    "timestamp": 1713345700.0,
+    "pattern": {"stimulus": "contradiction"},
+    "reward": 0.9,
+    "emotion": {"determination": 0.7, "clarity": 0.8},
+    "context": "belief_drift_resolution"
+  }
+]

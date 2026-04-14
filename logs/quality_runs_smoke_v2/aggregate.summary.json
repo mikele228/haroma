@@ -1,0 +1,59 @@
+{
+  "harness": "run_quality_iterations",
+  "harness_version": "2.1",
+  "turns_per_run": 3,
+  "num_runs": 1,
+  "depth": "fast",
+  "latency_target_sec": 1.0,
+  "quality_means_per_run": [
+    27.667
+  ],
+  "quality_slope_per_turn_per_run": [
+    0.0
+  ],
+  "within_run_delta_last_minus_first_per_run": [
+    0.0
+  ],
+  "mean_within_run_delta_last_minus_first": 0.0,
+  "mean_quality_slope_per_turn": 0.0,
+  "latency_mean_per_run": [
+    2.0146
+  ],
+  "latency_max_per_run": [
+    2.7635
+  ],
+  "all_runs_all_under_threshold": false,
+  "quality_trend_eps": 3.0,
+  "quality_trend_non_decreasing": true,
+  "quality_trend_strict_non_decreasing": true,
+  "runs": [
+    {
+      "turns": 3,
+      "quality_mean": 27.667,
+      "quality_min": 25.0,
+      "quality_max": 33.0,
+      "quality_slope_per_turn": 0.0,
+      "quality_first_third_mean": 25.0,
+      "quality_mid_third_mean": 33.0,
+      "quality_last_third_mean": 25.0,
+      "within_run_quality_delta_last_minus_first": 0.0,
+      "latency_mean_sec": 2.0146,
+      "latency_max_sec": 2.7635,
+      "latency_p50_sec": 1.7823,
+      "latency_p95_sec": 1.7823,
+      "fraction_under_threshold": 0.0,
+      "latency_threshold_sec": 1.0,
+      "all_under_threshold": false,
+      "quality_by_turn": [
+        25.0,
+        33.0,
+        25.0
+      ],
+      "quality_by_turn_note": null,
+      "run": 1,
+      "wall_clock_sec": 6.05
+    }
+  ],
+  "note_within_run": "within_run_delta_last_minus_first: mean quality last third of turns minus first third (positive \u21d2 improving through session). quality_slope_per_turn: LS slope vs turn index.",
+  "note_across_runs": "quality_means_per_run: same prompts repeated; watch for drift or warm-up as memory fills."
+}

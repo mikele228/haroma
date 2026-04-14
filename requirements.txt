@@ -1,0 +1,35 @@
+# HaromaX6 - Symbolic Cognitive Agent Framework
+#
+# CI / quick install (skips llama-cpp-python C++ build on Windows):
+#   pip install -r requirements-core.txt
+# Full install including local GGUF:
+#   pip install -r requirements.txt
+
+# ML / Vision / NLP
+numpy
+torch
+opencv-python
+transformers
+sentence-transformers
+Pillow
+spacy
+
+# Dense retrieval (U14)
+faiss-cpu
+
+# Audio
+librosa
+soundfile
+
+# Neural perception (U12)
+open-clip-torch
+openai-whisper
+
+# Local LLM inference
+llama-cpp-python
+
+# Web / HTTP
+fastapi
+flask
+requests
+uvicorn

@@ -1,0 +1,14 @@
+{
+  "turns": 10,
+  "quality_mean": 73.2,
+  "quality_min": 70.0,
+  "latency_mean_sec": 0.3993,
+  "latency_max_sec": 0.6396,
+  "latency_p50_sec": 0.3679,
+  "latency_p95_sec": 0.4209,
+  "fraction_under_threshold": 1.0,
+  "latency_threshold_sec": 1.0,
+  "all_under_threshold": true,
+  "run": 3,
+  "wall_clock_sec": 4.0
+}

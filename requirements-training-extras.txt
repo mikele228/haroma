@@ -1,0 +1,12 @@
+# Install after requirements.txt (or requirements-core.txt) for maximum training surfaces:
+#   pip install -r requirements-training-extras.txt
+#
+# Documentation: docs/reference-training-integrations.md
+#
+# Includes: Gymnasium bridge, sklearn linear scorer helper, Vowpal Wabbit online reward.
+# If ``python -c "import vowpalwabbit"`` crashes on Windows, skip the vowpalwabbit line
+# or install a matching VC++ runtime; Haroma runs without VW.
+# Optional Ray (offline RLlib workflows on JSONL): pip install "ray[rllib]"
+
+-r requirements-rl.txt
+vowpalwabbit>=9.0.0

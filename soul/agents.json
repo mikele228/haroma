@@ -1,0 +1,197 @@
+{
+  "routing_strategy": "trueself",
+  "max_personas": 5,
+
+  "llm": {
+    "mode": "auto",
+    "prefer_local": false,
+    "local_gguf": "models/qwen2.5-1.5b-instruct-q4_k_m.gguf",
+    "n_gpu_layers": -1
+  },
+
+  "memory": {
+    "seed_context_enabled": true,
+    "seed_max_chars": 600,
+    "touch_policy": "recalled_plus_core",
+    "llm_centric": true
+  },
+
+  "goals": {
+    "fifo_input": true,
+    "unify_sensor_with_text": true,
+    "multi_goal_per_cycle": true,
+    "max_cycle_goals": 3,
+    "max_actions_per_goal": 2
+  },
+
+  "organizational_goals": {
+    "consensus_votes": 2,
+    "ceo_ticks_to_complete": 3
+  },
+
+  "action_agent": {
+    "tick_interval": 1.0
+  },
+
+  "trueself": {
+    "tick_interval": 0.12,
+    "fast_path_threshold": 0.4,
+    "delegation_timeout_ms": 30000
+  },
+
+  "initial_personas": [
+    {
+      "id": "primary",
+      "name": "Core",
+      "affinity": {
+        "topics": [],
+        "emotion_range": "all",
+        "is_default": true
+      }
+    },
+    {
+      "id": "analyst",
+      "name": "Analyst",
+      "affinity": {
+        "topics": ["logic", "reason", "math", "science", "analyze", "explain"],
+        "emotion_range": "all",
+        "is_default": false
+      }
+    }
+  ],
+
+  "background": {
+    "tick_interval": 5.0,
+    "reconcile_every_n_ticks": 2,
+    "dream_every_n_ticks": 5,
+    "dream_consolidate_max_nodes": 20000,
+    "training_enabled": true,
+    "spawn_on_divergence_threshold": 0.7,
+    "autonomy_enabled": true,
+    "autonomy_initiative_every_n_ticks": 7,
+    "autonomy_stimulus_queue_max": 12,
+    "web_learn": {
+      "enabled": true,
+      "respect_robots_txt": true,
+      "min_delay_sec_per_host": 1.0,
+      "every_n_ticks": 12,
+      "allowed_hosts": ["en.wikipedia.org"],
+      "seed_urls": [
+        "https://en.wikipedia.org/wiki/Artificial_intelligence",
+        "https://en.wikipedia.org/wiki/Machine_learning",
+        "https://en.wikipedia.org/wiki/Deep_learning",
+        "https://en.wikipedia.org/wiki/Neural_network_(machine_learning)",
+        "https://en.wikipedia.org/wiki/Natural_language_processing",
+        "https://en.wikipedia.org/wiki/Cognitive_science",
+        "https://en.wikipedia.org/wiki/Neuroscience",
+        "https://en.wikipedia.org/wiki/Human_brain",
+        "https://en.wikipedia.org/wiki/Consciousness",
+        "https://en.wikipedia.org/wiki/Philosophy_of_mind",
+        "https://en.wikipedia.org/wiki/Epistemology",
+        "https://en.wikipedia.org/wiki/Scientific_method",
+        "https://en.wikipedia.org/wiki/Systems_theory",
+        "https://en.wikipedia.org/wiki/Cybernetics",
+        "https://en.wikipedia.org/wiki/Information_theory",
+        "https://en.wikipedia.org/wiki/Computation",
+        "https://en.wikipedia.org/wiki/Algorithm",
+        "https://en.wikipedia.org/wiki/Computer_science",
+        "https://en.wikipedia.org/wiki/Software_engineering",
+        "https://en.wikipedia.org/wiki/Programming_language",
+        "https://en.wikipedia.org/wiki/Mathematics",
+        "https://en.wikipedia.org/wiki/Statistics",
+        "https://en.wikipedia.org/wiki/Probability_theory",
+        "https://en.wikipedia.org/wiki/Linear_algebra",
+        "https://en.wikipedia.org/wiki/Calculus",
+        "https://en.wikipedia.org/wiki/Graph_theory",
+        "https://en.wikipedia.org/wiki/Logic",
+        "https://en.wikipedia.org/wiki/Decision_theory",
+        "https://en.wikipedia.org/wiki/Game_theory",
+        "https://en.wikipedia.org/wiki/Economics",
+        "https://en.wikipedia.org/wiki/Behavioral_economics",
+        "https://en.wikipedia.org/wiki/Psychology",
+        "https://en.wikipedia.org/wiki/Cognitive_bias",
+        "https://en.wikipedia.org/wiki/Memory",
+        "https://en.wikipedia.org/wiki/Learning",
+        "https://en.wikipedia.org/wiki/Emotion",
+        "https://en.wikipedia.org/wiki/Motivation",
+        "https://en.wikipedia.org/wiki/Evolution",
+        "https://en.wikipedia.org/wiki/Natural_selection",
+        "https://en.wikipedia.org/wiki/Genetics",
+        "https://en.wikipedia.org/wiki/Cell_(biology)",
+        "https://en.wikipedia.org/wiki/Molecular_biology",
+        "https://en.wikipedia.org/wiki/Biochemistry",
+        "https://en.wikipedia.org/wiki/Ecology",
+        "https://en.wikipedia.org/wiki/Climate_change",
+        "https://en.wikipedia.org/wiki/Sustainability",
+        "https://en.wikipedia.org/wiki/Renewable_energy",
+        "https://en.wikipedia.org/wiki/Public_health",
+        "https://en.wikipedia.org/wiki/Epidemiology",
+        "https://en.wikipedia.org/wiki/Medicine",
+        "https://en.wikipedia.org/wiki/Anatomy",
+        "https://en.wikipedia.org/wiki/History_of_science",
+        "https://en.wikipedia.org/wiki/Scientific_Revolution",
+        "https://en.wikipedia.org/wiki/Age_of_Enlightenment",
+        "https://en.wikipedia.org/wiki/Industrial_Revolution",
+        "https://en.wikipedia.org/wiki/World_War_II",
+        "https://en.wikipedia.org/wiki/Cold_War",
+        "https://en.wikipedia.org/wiki/United_Nations",
+        "https://en.wikipedia.org/wiki/International_law",
+        "https://en.wikipedia.org/wiki/Human_rights",
+        "https://en.wikipedia.org/wiki/Democracy",
+        "https://en.wikipedia.org/wiki/Ethics",
+        "https://en.wikipedia.org/wiki/Utilitarianism",
+        "https://en.wikipedia.org/wiki/Virtue_ethics",
+        "https://en.wikipedia.org/wiki/Existentialism",
+        "https://en.wikipedia.org/wiki/Stoicism",
+        "https://en.wikipedia.org/wiki/Buddhism",
+        "https://en.wikipedia.org/wiki/Sociology",
+        "https://en.wikipedia.org/wiki/Anthropology",
+        "https://en.wikipedia.org/wiki/Linguistics",
+        "https://en.wikipedia.org/wiki/Semantics",
+        "https://en.wikipedia.org/wiki/Pragmatics",
+        "https://en.wikipedia.org/wiki/Writing",
+        "https://en.wikipedia.org/wiki/Rhetoric",
+        "https://en.wikipedia.org/wiki/Literature",
+        "https://en.wikipedia.org/wiki/Poetry",
+        "https://en.wikipedia.org/wiki/Art",
+        "https://en.wikipedia.org/wiki/Music",
+        "https://en.wikipedia.org/wiki/Architecture",
+        "https://en.wikipedia.org/wiki/Design",
+        "https://en.wikipedia.org/wiki/Creativity",
+        "https://en.wikipedia.org/wiki/Problem_solving",
+        "https://en.wikipedia.org/wiki/Critical_thinking",
+        "https://en.wikipedia.org/wiki/Metacognition",
+        "https://en.wikipedia.org/wiki/Attention",
+        "https://en.wikipedia.org/wiki/Sleep",
+        "https://en.wikipedia.org/wiki/Circadian_rhythm",
+        "https://en.wikipedia.org/wiki/Nutrition",
+        "https://en.wikipedia.org/wiki/Physical_exercise",
+        "https://en.wikipedia.org/wiki/Mental_health",
+        "https://en.wikipedia.org/wiki/Reinforcement_learning",
+        "https://en.wikipedia.org/wiki/Bayesian_inference",
+        "https://en.wikipedia.org/wiki/Complex_systems",
+        "https://en.wikipedia.org/wiki/Emergence",
+        "https://en.wikipedia.org/wiki/Self-organization",
+        "https://en.wikipedia.org/wiki/Feedback",
+        "https://en.wikipedia.org/wiki/Control_theory",
+        "https://en.wikipedia.org/wiki/Robotics",
+        "https://en.wikipedia.org/wiki/Ethics_of_artificial_intelligence",
+        "https://en.wikipedia.org/wiki/Knowledge_representation_and_reasoning"
+      ],
+      "max_chars": 6000,
+      "max_urls_per_tick": 1,
+      "follow_links": true,
+      "max_links_per_page": 12,
+      "max_queue_len": 400,
+      "timeout_sec": 18
+    }
+  },
+
+  "input": {
+    "tick_interval": 0.12
+  },
+
+  "persona": {
+    "tick_interval": 0.12
+  }
+}

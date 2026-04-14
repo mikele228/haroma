@@ -1,0 +1,94 @@
+[project]
+name = "haromax6"
+version = "0.0.0"
+description = "HaromaX6 cognitive agent (dev metadata for tooling only)"
+requires-python = ">=3.11"
+readme = "README.md"
+dependencies = ["numpy>=2.0,<3", "requests>=2.28", "flask>=3.0"]
+
+[project.optional-dependencies]
+# Online regression on (prompt, response) -> reward; ``HAROMA_VW_REWARD=1``
+vowpal = ["vowpalwabbit>=9.10"]
+# Heavy: use exported JSONL with Ray RLlib offline pipelines; logging only in-process
+rllib = ["ray[rllib]>=2.9"]
+trainers = ["vowpalwabbit>=9.10", "ray[rllib]>=2.9"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+extend-exclude = [
+    ".pixi",
+    "data",
+    "web",
+    ".pytest_cache",
+    ".venv",
+    "venv",
+    "__pycache__",
+]
+
+# Pragmatic default: Pyflakes + import cycles; skip E501 line-length noise across legacy code.
+[tool.ruff.lint]
+select = ["F", "E4", "E7", "E9"]
+ignore = ["E402", "E741"]
+
+[tool.mypy]
+python_version = "3.11"
+explicit_package_bases = true
+mypy_path = "."
+ignore_missing_imports = true
+warn_return_any = false
+warn_unused_ignores = false
+check_untyped_defs = false
+exclude = [
+    "(^|/)data/",
+    "(^|/)web/",
+    "(^|/)scripts/",
+    "(^|/)tests/",
+]
+
+[[tool.mypy.overrides]]
+module = [
+    "torch.*",
+    "transformers.*",
+    "sentence_transformers.*",
+    "cv2.*",
+    "PIL.*",
+    "faiss.*",
+    "llama_cpp.*",
+    "spacy.*",
+    "librosa.*",
+    "whisper.*",
+    "open_clip.*",
+]
+ignore_errors = true
+
+# --- Pixi (same task *names* as AiScript_backend) ---
+#   pixi install
+#   pixi run lint | lint_smoke | format | format_check | type_check | quality_check | check_smoke
+#   pixi run test  → full suite uses deps in [project] (numpy, requests, flask); more via install_runtime.
+# Install: https://pixi.sh/
+
+[tool.pixi.workspace]
+channels = ["conda-forge"]
+platforms = ["win-64", "linux-64", "osx-64", "osx-arm64"]
+
+[tool.pixi.dependencies]
+python = "3.11.*"
+ruff = ">=0.9.0"
+mypy = ">=1.11.0"
+pytest = ">=8.0.0"
+pre-commit = ">=4.0.0"
+
+[tool.pixi.tasks]
+lint = "ruff check ."
+lint_smoke = "ruff check agents core engine mind sensors utils soul main.py --select F821,E9"
+format = "ruff format ."
+format_check = "ruff format --check ."
+type_check = "mypy mind/deliberative_choice.py mind/cognitive_contracts.py mind/chat_visibility.py mind/deliberative_llm_merge.py mind/response_text.py utils/coerce_bool.py engine/LLMContextReasoner.py --explicit-package-bases --follow-imports=skip"
+quality_check = "python scripts/quality_check.py"
+# Same as AiScript: ``pytest tests``. Extra stacks: ``pixi run install_runtime``.
+test = "pytest tests -q --tb=short"
+# One-shot: pull runtime stack into the active env (use inside ``pixi shell`` or after ``pixi install``).
+install_runtime = "python -m pip install -r requirements-core.txt"
+check_smoke = "python scripts/run_checks.py"
+chat_bench = "python scripts/benchmark_chat_response_time.py"
