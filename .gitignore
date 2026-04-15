@@ -4,3 +4,9 @@
 # Local runtime data and model weights (not tracked)
 data/
 models/
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
