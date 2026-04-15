@@ -375,7 +375,11 @@ class BackgroundAgent(BaseAgent):
             return None, None
         eng = s.goal.engine
         try:
-            priorities = eng.prioritize() if hasattr(eng, "prioritize") else list(eng.goals.keys())
+            priorities = (
+                eng.prioritize_workfront()
+                if hasattr(eng, "prioritize_workfront")
+                else (eng.prioritize() if hasattr(eng, "prioritize") else list(eng.goals.keys()))
+            )
             for gid in priorities[:5]:
                 g = eng.goals.get(gid)
                 if isinstance(g, dict):
@@ -744,7 +748,11 @@ class BackgroundAgent(BaseAgent):
             if _is_real(s.goal) and hasattr(s.goal, "engine"):
                 try:
                     eng = s.goal.engine
-                    priorities = eng.prioritize() if hasattr(eng, "prioritize") else []
+                    priorities = (
+                        eng.prioritize_workfront()
+                        if hasattr(eng, "prioritize_workfront")
+                        else (eng.prioritize() if hasattr(eng, "prioritize") else [])
+                    )
                     for gid in priorities[:3]:
                         g = eng.goals.get(gid)
                         if isinstance(g, dict):

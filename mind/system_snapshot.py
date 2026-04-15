@@ -146,6 +146,16 @@ def build_http_status_payload(
         if _snapshot_debug():
             _log.debug("cognitive_metrics.snapshot", exc_info=True)
 
+    _input_buffer: Dict[str, Any] = {"text_pending": 0, "sensor_pending": 0}
+    try:
+        _inp = getattr(boot_agent, "input_agent", None)
+        if _inp is not None and hasattr(_inp, "buffer_stats"):
+            _input_buffer = _inp.buffer_stats()
+    except Exception:
+        notes.append("input_agent.buffer_stats failed")
+        if _snapshot_debug():
+            _log.debug("input_agent.buffer_stats", exc_info=True)
+
     _lab_rid = getattr(s, "lab_run_id", None)
     _ae_err = getattr(s, "agent_environment_error", None)
     _health: Dict[str, Any] = {
@@ -163,11 +173,48 @@ def build_http_status_payload(
         notes.append("embodiment_readiness_failed")
         _emb = {"ok": False, "error": str(_emb_e)[:160]}
 
+    _del_timeouts = 0
+    _chat_turns = 0
+    if isinstance(_cognitive_obs, dict):
+        try:
+            _del_timeouts = int(_cognitive_obs.get("delegation_timeouts") or 0)
+        except (TypeError, ValueError):
+            _del_timeouts = 0
+        try:
+            _chat_turns = int(_cognitive_obs.get("chat_turns") or 0)
+        except (TypeError, ValueError):
+            _chat_turns = 0
+
+    _text_buf = 0
+    try:
+        _text_buf = int(_input_buffer.get("text_pending") or 0) + int(
+            _input_buffer.get("text_priority_pending") or 0
+        )
+    except (TypeError, ValueError):
+        _text_buf = 0
+    try:
+        _sensor_buf = int(_input_buffer.get("sensor_pending") or 0)
+    except (TypeError, ValueError):
+        _sensor_buf = 0
+
+    _life_loop: Dict[str, Any] = {
+        "alive": _health.get("process") == "up",
+        "cycle_count": int(getattr(s, "cycle_count", 0) or 0),
+        "idle_cycles": 0,
+        "external_cycles": _chat_turns,
+        "errors": _del_timeouts,
+        "buffer": {
+            "text_pending": _text_buf,
+            "sensor_pending": _sensor_buf,
+        },
+    }
+
     out: Dict[str, Any] = {
         "architecture": "multi-agent-v2",
         "lab_run_id": str(_lab_rid) if _lab_rid else None,
         "health": _health,
         "embodiment_readiness": _emb,
+        "life_loop": _life_loop,
         "agents": boot_agent.stats(),
         "cycle_count": s.cycle_count,
         "memory_nodes": s.memory.count_nodes(),

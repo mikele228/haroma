@@ -104,6 +104,8 @@ _CONVERSATIONAL_BORING_FRAGMENTS = (
     # ReasoningEngine KG gap-filling — not user-facing chat copy
     "gather information about",
     "insufficient knowledge",
+    "known relations)",  # "Learn more about X (only N known relations)"
+    "sparse knowledge",
 )
 
 
@@ -897,6 +899,8 @@ class ActionGenerator:
                 if "gather information about" in st_low and any(
                     str(p or "").strip().lower() == "insufficient knowledge" for p in pre
                 ):
+                    return ActionCandidate("advance_goal", [])
+                if "learn more about" in st_low and "known relations" in st_low:
                     return ActionCandidate("advance_goal", [])
             elements.append(step_text)
             if pre:

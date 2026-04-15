@@ -115,14 +115,18 @@ import time
 import uuid
 from typing import Any, Dict, Optional, Tuple
 import atexit
+import re
 import threading
 import traceback as _tb
 
 from flask import (
     Flask,
+    abort,
     current_app,
     g,
     has_app_context,
+    make_response,
+    redirect,
     request,
     send_from_directory,
     Response,
@@ -183,6 +187,8 @@ from sensors.adapters import (
 )
 
 _WEB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web")
+# Flat files only under web/ (no path traversal) for logo / favicon assets.
+_SAFE_WEB_ASSET = re.compile(r"^[A-Za-z0-9._-]+\.(svg|png|ico|webp)$")
 
 app = Flask(__name__, static_folder=None)
 get_haroma_server_state(app)
@@ -535,7 +541,32 @@ def handle_exception(e):
 
 @app.route("/")
 def serve_index():
-    return send_from_directory(_WEB_DIR, "index.html")
+    resp = make_response(send_from_directory(_WEB_DIR, "index.html"))
+    resp.headers["Cache-Control"] = "no-store, max-age=0, must-revalidate"
+    return resp
+
+
+@app.route("/assets/<path:filename>")
+def serve_web_asset(filename: str):
+    """Serve small static files from ``web/`` (logo, icons)."""
+    base = os.path.basename(filename)
+    if base != filename or not _SAFE_WEB_ASSET.match(base):
+        abort(404)
+    path = os.path.join(_WEB_DIR, base)
+    if not os.path.isfile(path):
+        abort(404)
+    resp = make_response(send_from_directory(_WEB_DIR, base))
+    resp.headers["Cache-Control"] = "public, max-age=86400"
+    return resp
+
+
+@app.route("/favicon.ico")
+def favicon():
+    """Browsers request /favicon.ico by default; point at our SVG mark."""
+    path = os.path.join(_WEB_DIR, "elarion-mark.svg")
+    if not os.path.isfile(path):
+        abort(404)
+    return redirect("/assets/elarion-mark.svg", code=302)
 
 
 @app.route("/chat", methods=["POST"])

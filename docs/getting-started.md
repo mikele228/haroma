@@ -38,39 +38,50 @@ HaromaX6 runs a **multi-threaded Flask server**, **several agent loops**, **PyTo
 
 ### Windows
 
-Open PowerShell as Administrator and run:
+Install **Python 3.10+** from [python.org](https://www.python.org/downloads/) (tick “Add to PATH”). For **`llama-cpp-python`**, install **Visual Studio Build Tools** (C++ workload) and **CMake**.
 
 ```powershell
-cd c:\Project\HaromaX6
+cd C:\path\to\HaromaX6
 .\setup_windows.ps1
+.\.venv\Scripts\Activate.ps1
+python main.py
 ```
 
-This script will:
-- Download and install Python 3.12 if not found
-- Upgrade pip and install all dependencies (CPU-only PyTorch, Flask, NumPy, spaCy, transformers, etc.)
-- Download the spaCy `en_core_web_sm` language model
-- Download the `sentence-transformers/all-MiniLM-L6-v2` embedding model
-- Create required data directories
-- Run `scripts/download_training_data.py` for public knowledge data
+`setup_windows.ps1` creates **`.venv`**, runs **`pip install -r requirements.txt`**, spaCy `en_core_web_sm`, optional HF cache warmup, `scripts/download_training_data.py`, and data dirs. Env: `HAROMA_SETUP_SKIP_TRAINING_DATA=1`, `HAROMA_SETUP_SKIP_SPACY=1` to skip steps.
 
 ### Linux
 
+Each distro has a script under **`scripts/`** (shared logic: **`scripts/setup_common.sh`**): system packages → **`.venv`** → **`requirements.txt`** (includes **`llama-cpp-python`**) → spaCy → training corpora. Run as **root** (`sudo`).
+
+| Distro | Installer |
+|--------|-----------|
+| Ubuntu, Debian, Mint, Raspberry Pi OS, Pop!_OS, elementary | `sudo bash scripts/setup_ubuntu.sh` |
+| Fedora, Rocky, Alma, RHEL (with `dnf`) | `sudo bash scripts/setup_fedora.sh` |
+| Arch, Manjaro, Artix | `sudo bash scripts/setup_arch.sh` |
+| Alpine | `sudo bash scripts/setup_alpine.sh` (musl; some wheels may need workarounds) |
+| openSUSE, SUSE | `sudo bash scripts/setup_opensuse.sh` |
+| Unknown / auto | `sudo ./setup_linux.sh` (reads `/etc/os-release` and dispatches) |
+
+Then:
+
 ```bash
-cd /path/to/HaromaX6
-chmod +x setup_linux.sh
-./setup_linux.sh
+source .venv/bin/activate
+python main.py
 ```
 
-Supports apt (Debian/Ubuntu), dnf (Fedora), pacman (Arch), and apk (Alpine). On Raspberry Pi, also installs I2C/GPIO sensor libraries.
+Optional env (all Linux setup scripts): `HAROMA_SETUP_SKIP_TRAINING_DATA=1`, `HAROMA_SETUP_SKIP_SPACY=1`, `HAROMA_PIP_EXTRA_ARGS="..."`.
 
 ---
 
 ## 2. Manual Setup
 
-If you prefer manual installation:
+If you prefer manual installation (use a **venv**):
 
 ```bash
+python3 -m venv .venv
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
+python scripts/generate_soul.py --defaults   # or interactive: python scripts/generate_soul.py
 python -m spacy download en_core_web_sm
 python scripts/download_training_data.py
 ```

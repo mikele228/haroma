@@ -1244,7 +1244,16 @@ class ReasoningEngine:
                         )
                     )
 
-        return plan_steps[:6]
+        # Same sparse-KG or gather-information line is often emitted once per
+        # matching goal; dedupe by description so plan_steps / UI are not spammed.
+        seen_desc: set[str] = set()
+        deduped: List[PlanStep] = []
+        for p in plan_steps:
+            if p.description in seen_desc:
+                continue
+            seen_desc.add(p.description)
+            deduped.append(p)
+        return deduped[:6]
 
     def _inf_to_dict(self, inf: Dict[str, Any]) -> Dict[str, Any]:
         return {

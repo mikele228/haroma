@@ -66,6 +66,10 @@ def test_payload_core_keys(monkeypatch: pytest.MonkeyPatch):
     assert out["bg_training_defer_cap_sec"] is None
     assert out["runtime_signals"]["http_chat_inflight"] == 0
     assert "status_build_notes" not in out
+    ll = out.get("life_loop") or {}
+    assert ll.get("alive") is True
+    assert ll.get("cycle_count") == 7
+    assert isinstance(ll.get("buffer"), dict)
 
 
 def test_defer_fields_when_inflight(monkeypatch: pytest.MonkeyPatch):

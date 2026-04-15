@@ -893,15 +893,22 @@ class ElarionController:
                 priority=episode.affect["intensity"],
                 source="emotion",
             )
-        priorities = self.goal.prioritize()
-        active_goals = [
-            {
+        priorities = self.goal.prioritize_workfront()
+        active_goals = []
+        for i, gid in enumerate(priorities[:5]):
+            g = self.goal.engine.goals.get(gid, {}) if hasattr(self.goal, "engine") else {}
+            row = {
                 "goal_id": gid,
-                "priority": self.goal.engine.goals.get(gid, {}).get("priority", 1.0 - i * 0.1),
-                "description": self.goal.engine.goals.get(gid, {}).get("description", ""),
+                "priority": g.get("priority", 1.0 - i * 0.1),
+                "description": g.get("description", ""),
             }
-            for i, gid in enumerate(priorities[:5])
-        ]
+            cg = g.get("child_goal_ids")
+            if cg:
+                row["child_goal_ids"] = cg
+            ai = g.get("action_items")
+            if ai:
+                row["action_items"] = ai
+            active_goals.append(row)
         episode.bind_goals(active_goals, urgency=len(priorities) / 10.0)
 
         self.workspace.broadcast(
@@ -931,15 +938,20 @@ class ElarionController:
             )
 
         if drive_goals:
-            priorities = self.goal.prioritize()
-            active_goals = [
-                {
+            priorities = self.goal.prioritize_workfront()
+            active_goals = []
+            for i, gid in enumerate(priorities[:5]):
+                g = self.goal.engine.goals.get(gid, {}) if hasattr(self.goal, "engine") else {}
+                row = {
                     "goal_id": gid,
                     "priority": i,
-                    "description": self.goal.engine.goals.get(gid, {}).get("description", ""),
+                    "description": g.get("description", ""),
                 }
-                for i, gid in enumerate(priorities[:5])
-            ]
+                if g.get("child_goal_ids"):
+                    row["child_goal_ids"] = g["child_goal_ids"]
+                if g.get("action_items"):
+                    row["action_items"] = g["action_items"]
+                active_goals.append(row)
             episode.bind_goals(active_goals, urgency=len(priorities) / 10.0)
 
         # ── 10.7. COGNITIVE APPRAISAL (goal-aware emotion refinement) ─

@@ -176,7 +176,7 @@ _JSON_SCHEMA_DESCRIPTION = """\
   "requires_confirmation": <true if answer is speculative and needs KG/memory grounding>,
   "env_updates": {
     "emotion": {"label": "<str from joy|wonder|curiosity|fear|sadness|anger|resolve|peace|surprise|neutral>", "intensity": <float 0.0–1.0>},
-    "goals": [{"goal_id": "<str>", "description": "<str>", "priority": <float 0.0–1.0>}],
+    "goals": [{"goal_id": "<str>", "description": "<str>", "priority": <float 0.0–1.0>, "child_goal_ids": ["<str>", ...] (optional — sub-goals that must be satisfied first), "action_items": ["<step>", ...] or [{"id":"a0","description":"<str>","done":false}] (optional checklist), "parent_goal_id": "<str>" (optional if this row is a child of another goal_id)}],
     "personality_nudges": [{"trait": "<openness|conscientiousness|extraversion|agreeableness|neuroticism|resilience|assertiveness>", "delta": <float -0.01..0.01>}],
     "kg_triples": [{"subject": "<str>", "predicate": "<str>", "object": "<str>", "confidence": <float>}],
     "wm_notes": [{"content": "<str>", "salience": <float 0.0–1.0>}],
@@ -315,8 +315,27 @@ def build_messages(
         for g in active_goals[:_MAX_GOAL_LINES]:
             desc = g.get("description", g.get("goal_id", str(g)))
             pri = g.get("priority", "?")
-            goal_strs.append(f"  - {desc} (priority {pri})")
-        persona_lines.append("Active goals:\n" + "\n".join(goal_strs))
+            gid = g.get("goal_id", "")
+            bits = [f"priority {pri}"]
+            if gid:
+                bits.insert(0, f"id={gid}")
+            cg = g.get("child_goal_ids")
+            if isinstance(cg, list) and cg:
+                bits.append("children=" + ",".join(str(x) for x in cg[:6]))
+            ai = g.get("action_items")
+            if isinstance(ai, list) and ai:
+                n = len(ai)
+                done = sum(
+                    1
+                    for x in ai
+                    if isinstance(x, dict) and x.get("done")
+                )
+                bits.append(f"actions {done}/{n}")
+            goal_strs.append(f"  - {desc} ({'; '.join(bits)})")
+        persona_lines.append(
+            "Active goals (parents complete only after children + action items):\n"
+            + "\n".join(goal_strs)
+        )
 
     # Laws
     law_ids = law_summary.get("ids", [])
@@ -342,7 +361,10 @@ def build_messages(
             "feel after this interaction. Use one of: joy, wonder, curiosity, "
             "fear, sadness, anger, resolve, peace, surprise, neutral.\n"
             "- env_updates.goals: register new goals or reinforce existing ones "
-            "when the conversation reveals them (max 3 per turn).\n"
+            "when the conversation reveals them (max 3 per turn). You may add "
+            "child_goal_ids (ordered sub-goals) and action_items (checklist); "
+            "the engine will not mark a parent complete until children and "
+            "checklist steps are done.\n"
             "- env_updates.personality_nudges: tiny trait adjustments (-0.01 to "
             "0.01) only when the interaction clearly warrants a shift.\n"
             "- env_updates.kg_triples: extract factual relationships from the "

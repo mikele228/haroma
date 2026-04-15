@@ -98,8 +98,8 @@ graph TB
 HaromaX6/
 ├── main.py                    Entry point — launches the server
 ├── requirements.txt           Python dependencies
-├── setup_windows.ps1          Windows setup script
-├── setup_linux.sh             Linux setup script
+├── setup_windows.ps1          Windows — `.venv` + `requirements.txt`
+├── setup_linux.sh             Linux — dispatches to `scripts/setup_{ubuntu,fedora,arch,alpine,opensuse}.sh`
 │
 ├── agents/                    Multi-agent control plane (default server)
 │   ├── boot_agent.py          BootAgent — SharedResources, bus, agent lifecycle

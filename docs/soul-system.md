@@ -4,7 +4,7 @@
 
 The soul is Elarion's immutable identity layer. It defines *who* Elarion is at a level that learning, memory, and even persistence cannot alter. The soul is loaded first at boot and re-asserted after every persistence restore.
 
-Implemented in [`core/SoulBinder.py`](../core/SoulBinder.py). Soul data lives in [`soul/`](../soul/).
+Implemented in [`core/SoulBinder.py`](../core/SoulBinder.py). Soul data lives in [`soul/`](../soul/) at runtime; **committed templates** are under [`scripts/soul_defaults/`](../scripts/soul_defaults/). Generate or refresh JSON with **`python scripts/generate_soul.py`** (see [Getting Started](getting-started.md)).
 
 The soul is **not** the **Brain CPU** (LLM). In **[minded architecture](minded-architecture-metaphor.md)** terms, the soul is **charter / constitution**; **Law** is the cognitive **procedure** that must remain compatible with that charter; the LLM is the **executive integrator** within those bounds.
 

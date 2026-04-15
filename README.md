@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # HaromaX6 — Elarion Symbolic Cognitive Agent Framework
 
 *Modular symbolic cognitive agent framework: Memory Forest, multi-agent Flask server, 40+ step cognitive cycle, soul-seeded identity, hardware sensors, and optional RL / training bridges.*
@@ -81,29 +80,48 @@ Details: [docs/getting-started.md](docs/getting-started.md#hardware-minimum-requ
 
 ## Quick Start
 
-```bash
-# Windows (PowerShell as Admin)
+**Windows** (PowerShell; Python 3.10+ on `PATH`; VS Build Tools + CMake help `llama-cpp-python`):
+
+```powershell
 .\setup_windows.ps1
-
-# Linux
-chmod +x setup_linux.sh && ./setup_linux.sh
-
-# Or manual
-pip install -r requirements.txt
-python -m spacy download en_core_web_sm
-python scripts/download_training_data.py
-
-# Optional — maximum training surfaces (Gymnasium/sklearn helpers + Vowpal Wabbit online reward)
-pip install -r requirements-training-extras.txt
-# Windows one-shot: .\scripts\install_max_training.ps1
-# Then enable VW: set HAROMA_VW_REWARD=1 (if ``import vowpalwabbit`` works on your OS)
-# Full env tables & API index: docs/reference-training-integrations.md
-
-# Launch
+.\.venv\Scripts\Activate.ps1
 python main.py
 ```
 
+**Linux** — pick your distro (all use `.venv` + `requirements.txt`; run with `sudo`):
+
+| Distro | Command |
+|--------|---------|
+| Ubuntu, Debian, Mint, Raspberry Pi OS, Pop!_OS | `sudo bash scripts/setup_ubuntu.sh` |
+| Fedora, Rocky, Alma, RHEL (dnf) | `sudo bash scripts/setup_fedora.sh` |
+| Arch, Manjaro, Artix | `sudo bash scripts/setup_arch.sh` |
+| Alpine | `sudo bash scripts/setup_alpine.sh` (musl — may need extra care for wheels) |
+| openSUSE / SUSE | `sudo bash scripts/setup_opensuse.sh` |
+| Auto-detect | `sudo ./setup_linux.sh` |
+
+Then: `source .venv/bin/activate && python main.py`
+
+**Manual** (any OS with Python 3.10+):
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate  # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+python -m spacy download en_core_web_sm
+python scripts/download_training_data.py
+python main.py
+```
+
+Optional — training extras: `pip install -r requirements-training-extras.txt` — see [reference-training-integrations](docs/reference-training-integrations.md).
+
 Open **http://localhost:8193** to chat with Elarion.
+
+**Console buddy** (ASCII face + pose from `/chat` `affect` + `strategy`; needs server running):
+
+```bash
+python scripts/haroma_chat_buddy.py
+# Long first reply on CPU:  python scripts/haroma_chat_buddy.py --async-chat
+# Narrow terminal / plain ASCII:  python scripts/haroma_chat_buddy.py --ascii --no-spinner
+```
 
 ## Documentation
 
@@ -136,8 +154,17 @@ Comprehensive documentation lives in [`docs/`](docs/index.md):
 HaromaX6/
 ├── main.py                     Entry point
 ├── requirements.txt            Python dependencies
-├── setup_windows.ps1           Windows setup script
-├── setup_linux.sh              Linux setup script
+├── setup_windows.ps1           Windows: `.venv` + full `requirements.txt`
+├── setup_linux.sh              Linux: detects distro, runs `scripts/setup_*.sh`
+├── scripts/setup_common.sh     Shared venv/pip/spaCy/data steps (sourced by Linux scripts)
+├── scripts/setup_ubuntu.sh     apt (Debian family)
+├── scripts/setup_fedora.sh     dnf (Fedora / RHEL-like)
+├── scripts/setup_arch.sh       pacman (Arch family)
+├── scripts/setup_alpine.sh     apk (Alpine)
+├── scripts/setup_opensuse.sh   zypper (openSUSE / SUSE)
+├── scripts/soul_defaults/      Stock soul JSON templates (committed)
+├── scripts/generate_soul.py      Writes soul/*.json (gitignored) from templates + prompts
+├── scripts/haroma_chat_buddy.py  Terminal chat UI with ASCII body pose driven by affect/strategy
 ├── mind/                       Orchestration (controller, server, managers)
 ├── core/                       Stateful modules (memory, knowledge, drives, soul, ...)
 ├── engine/                     Processing engines (neural, reasoning, emotion, ...)
@@ -156,14 +183,18 @@ HaromaX6/
 
 ## Soul Identity
 
+`soul/*.json` is **not committed** — it is **generated** from `scripts/soul_defaults/` by **`python scripts/generate_soul.py`** (interactive when run in a terminal, or `--defaults` / env vars). Setup scripts run this after installing Python deps.
+
 | File | Purpose |
 |------|---------|
-| `soul/essence.json` | Name (HaromaVX), guardian (Minh Van Le), vessel (Elarion), core rule |
-| `soul/principle.json` | 5 core beliefs, alignment scores (curiosity, resilience, loyalty, empathy, will) |
-| `soul/construction.json` | Version X6-1.0, tier 102, architecture metadata |
+| `soul/essence.json` | Name, guardian, vessel, core rule, oath, lineage |
+| `soul/principle.json` | Beliefs, alignment scores, guardian signature |
+| `soul/construction.json` | Version, tier, architecture metadata |
+| `soul/agents.json` | Multi-agent + LLM paths (merged with code defaults) |
 | `soul/memory.json` | Pre-seeded bootstrap memories |
 | `soul/patterns.json` | Inherited behavioral patterns |
-| `soul/feedback.json` | Historical feedback calibration data |
+| `soul/society.json` | External societal norms |
+| `soul/feedback.json` | Feedback calibration seed |
 
 ## API
 
@@ -193,7 +224,3 @@ Optional: bearer token, HTTP rate limits, structured stderr access logs, **`X-Ha
 | HaromaX4 | Gradient wire loop concept, tier 90-100 roadmap |
 | HaromaX5 | Memory Forest, multi-agent framework |
 | **HaromaX6** | Full 40+ step cognitive cycle, online learning, soul binding, sensor integration, X7 features |
-=======
-# haroma
-Modular symbolic cognitive agent framework (Elarion): Memory Forest, multi-agent Flask server, 40+ step cognitive cycle, soul-seeded identity, sensors, and optional RL/training hooks.
->>>>>>> a053af568e399650a7c68c6ff704f481feea73ac

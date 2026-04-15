@@ -100,9 +100,25 @@ class GoalManager:
         self.engine = get_shared_goal_engine()
 
     def register_goal(
-        self, goal_id: str, description: str, priority: float = 0.5, source: str = "system"
+        self,
+        goal_id: str,
+        description: str,
+        priority: float = 0.5,
+        source: str = "system",
+        *,
+        child_goal_ids: Optional[List[str]] = None,
+        action_items: Optional[List[Any]] = None,
+        parent_goal_id: Optional[str] = None,
     ):
-        self.engine.register_goal(goal_id, description, priority, source)
+        self.engine.register_goal(
+            goal_id,
+            description,
+            priority,
+            source,
+            child_goal_ids=child_goal_ids,
+            action_items=action_items,
+            parent_goal_id=parent_goal_id,
+        )
 
     def bump_goal_priority(self, goal_id: str, delta: float) -> bool:
         return self.engine.bump_goal_priority(goal_id, delta)
@@ -114,17 +130,39 @@ class GoalManager:
         priority: float = 0.5,
         source: str = "input",
         meta: Optional[Dict[str, Any]] = None,
+        *,
+        child_goal_ids: Optional[List[str]] = None,
+        action_items: Optional[List[Any]] = None,
+        parent_goal_id: Optional[str] = None,
     ):
-        self.engine.register_input_goal(goal_id, description, priority, source, meta)
+        self.engine.register_input_goal(
+            goal_id,
+            description,
+            priority,
+            source,
+            meta,
+            child_goal_ids=child_goal_ids,
+            action_items=action_items,
+            parent_goal_id=parent_goal_id,
+        )
+
+    def complete_goal(self, goal_id: str) -> bool:
+        return self.engine.complete_goal(goal_id)
 
     def complete_input_goal(self, goal_id: str) -> bool:
         return self.engine.complete_input_goal(goal_id)
+
+    def mark_action_done(self, goal_id: str, action_id: str) -> bool:
+        return self.engine.mark_action_done(goal_id, action_id)
 
     def current_input_goal(self) -> Optional[str]:
         return self.engine.current_input_goal()
 
     def prioritize(self) -> List[str]:
         return self.engine.prioritize()
+
+    def prioritize_workfront(self) -> List[str]:
+        return self.engine.prioritize_workfront()
 
     def activate(self, strategy: Optional[str] = None) -> Dict[str, Any]:
         return self.engine.activate(strategy)

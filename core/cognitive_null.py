@@ -77,6 +77,11 @@ def _imagination_simulate(*_a: Any, **_k: Any) -> Dict[str, Any]:
     return {"scenarios": [], "imagined_plan": []}
 
 
+def _mental_predict_behavior(*_a: Any, **_k: Any) -> Dict[str, Any]:
+    """Match :meth:`engine.MentalSimulator.predict_behavior` when no model."""
+    return {"predicted_action": "unknown", "confidence": 0.0}
+
+
 # Methods sometimes invoked on stubbed engines before/without ``_module_real`` guards.
 _NULL_METHODS: Dict[str, Callable[..., Any]] = {
     # LLM / composer / generative
@@ -139,6 +144,8 @@ _NULL_METHODS: Dict[str, Callable[..., Any]] = {
     "encode": _z_none,
     "ground": _z_dict,
     "simulate_turn": _z_dict,
+    "update_model": _z_none,
+    "predict_behavior": _mental_predict_behavior,
     # Goal synthesis / reconciliation / emotion engine surface
     "synthesize": _z_list,
     "reconcile": _z_dict,

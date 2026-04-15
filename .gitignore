@@ -10,3 +10,9 @@ __pycache__/
 *.py[cod]
 *$py.class
 .pytest_cache/
+
+# Local virtualenv (scripts/setup_ubuntu.sh)
+.venv/
+
+# Soul identity — generated from scripts/soul_defaults via scripts/generate_soul.py
+soul/*.json

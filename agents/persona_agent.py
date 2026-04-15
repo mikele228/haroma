@@ -1115,7 +1115,11 @@ class PersonaAgent(BaseAgent):
                     priority=episode.affect["intensity"],
                     source="emotion",
                 )
-            priorities = s.goal.prioritize()
+            priorities = (
+                s.goal.prioritize_workfront()
+                if hasattr(s.goal, "prioritize_workfront")
+                else s.goal.prioritize()
+            )
             _goal_store = s.goal.engine.goals
             active_goals: List[Dict[str, Any]] = []
             _gb_goals = getattr(s, "goal_board", None)
@@ -1135,14 +1139,17 @@ class PersonaAgent(BaseAgent):
                 if _mandate_gid and gid == _mandate_gid:
                     continue
                 ginfo = _goal_store[gid] if isinstance(_goal_store.get(gid), dict) else {}
-                active_goals.append(
-                    {
-                        "goal_id": gid,
-                        "priority": ginfo.get("priority", 0.5),
-                        "description": ginfo.get("description", gid),
-                        "source": ginfo.get("source", ""),
-                    }
-                )
+                _row: Dict[str, Any] = {
+                    "goal_id": gid,
+                    "priority": ginfo.get("priority", 0.5),
+                    "description": ginfo.get("description", gid),
+                    "source": ginfo.get("source", ""),
+                }
+                if ginfo.get("child_goal_ids"):
+                    _row["child_goal_ids"] = ginfo["child_goal_ids"]
+                if ginfo.get("action_items"):
+                    _row["action_items"] = ginfo["action_items"]
+                active_goals.append(_row)
             episode.bind_goals(active_goals, urgency=min(1.0, len(priorities) / 10.0))
 
             # -- 10.5. Drives ---------------------------------------------
@@ -2324,10 +2331,15 @@ class PersonaAgent(BaseAgent):
         if dream_topics:
             return random.choice(dream_topics)
 
-        # 4. Active goals (prioritize() returns goal ids for GoalEngine)
+        # 4. Active goals (workfront = not blocked by incomplete children)
         if s.goal is not None:
             try:
-                top_ids = s.goal.prioritize()[:3] if hasattr(s.goal, "prioritize") else []
+                _pf = getattr(s.goal, "prioritize_workfront", None)
+                top_ids = (
+                    _pf()[:3]
+                    if callable(_pf)
+                    else (s.goal.prioritize()[:3] if hasattr(s.goal, "prioritize") else [])
+                )
                 eng = getattr(s.goal, "engine", None)
                 goals_map = getattr(eng, "goals", None) if eng is not None else None
                 for gid in top_ids:
@@ -2577,7 +2589,21 @@ class PersonaAgent(BaseAgent):
                         continue
                     try:
                         pri = max(0.0, min(1.0, float(g.get("priority", 0.5))))
-                        _goal_mgr.register_goal(gid, desc, pri, source="llm_env")
+                        extra = {}
+                        cg = g.get("child_goal_ids")
+                        if isinstance(cg, list) and cg:
+                            extra["child_goal_ids"] = [
+                                str(x).strip() for x in cg if str(x).strip()
+                            ]
+                        ai = g.get("action_items")
+                        if isinstance(ai, list) and ai:
+                            extra["action_items"] = ai
+                        pg = g.get("parent_goal_id")
+                        if pg is not None and str(pg).strip():
+                            extra["parent_goal_id"] = str(pg).strip()
+                        _goal_mgr.register_goal(
+                            gid, desc, pri, source="llm_env", **extra
+                        )
                     except Exception as _e:
                         print(f"[Persona:{self.agent_id}] env goal error: {_e}", flush=True)
 

@@ -1,4 +1,4 @@
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 from core.Memory import MemoryForest
 
 
@@ -43,7 +43,6 @@ class GoalCollapseDetector:
 
 
 from utils.module_base import ModuleBase
-from typing import Dict, List, Any, Optional
 import threading
 import time
 
@@ -71,12 +70,36 @@ def reset_shared_goal_engine_for_tests() -> None:
             _shared_goal_engine = None
 
 
+def _normalize_action_items(raw: Optional[List[Any]]) -> List[Dict[str, Any]]:
+    """Turn strings or dicts into ``{id, description, done}`` rows."""
+    out: List[Dict[str, Any]] = []
+    for i, it in enumerate(raw or []):
+        if isinstance(it, str):
+            aid = f"a_{i}"
+            out.append({"id": aid, "description": it.strip(), "done": False})
+        elif isinstance(it, dict):
+            aid = str(it.get("id") or f"a_{i}")
+            out.append(
+                {
+                    "id": aid,
+                    "description": str(it.get("description") or "").strip(),
+                    "done": bool(it.get("done")),
+                }
+            )
+    return out
+
+
 class GoalEngine(ModuleBase):
     """
     Tier MAX+ Engine: Manages symbolic goals, task priorities, activation strategies, and mission continuity.
 
     Input-derived goals live in a FIFO ``input_goal_queue`` and are
     prioritized in arrival order ahead of non-input goals.
+
+    Hierarchical goals: optional ``child_goal_ids`` and ``action_items``. A goal
+    is completed only when every child goal is completed and every action item
+    is marked done; completing the last child auto-completes ancestors when
+    their remaining constraints are satisfied.
     """
 
     def __init__(self, context_engine: Optional[Any] = None):
@@ -100,15 +123,29 @@ class GoalEngine(ModuleBase):
         return {"score": None, "reason": "no context engine"}
 
     def register_goal(
-        self, goal_id: str, description: str, priority: float = 0.5, source: str = "system"
+        self,
+        goal_id: str,
+        description: str,
+        priority: float = 0.5,
+        source: str = "system",
+        *,
+        child_goal_ids: Optional[List[str]] = None,
+        action_items: Optional[List[Any]] = None,
+        parent_goal_id: Optional[str] = None,
     ):
         with self._lock:
-            self.goals[goal_id] = {
+            row: Dict[str, Any] = {
                 "description": description,
                 "priority": round(priority, 3),
                 "source": source,
                 "timestamp": time.time(),
+                "completed": False,
+                "child_goal_ids": list(child_goal_ids) if child_goal_ids else [],
+                "action_items": _normalize_action_items(action_items),
             }
+            if parent_goal_id:
+                row["parent_goal_id"] = parent_goal_id
+            self.goals[goal_id] = row
             self.state["goals"] = self.goals
 
     def bump_goal_priority(self, goal_id: str, delta: float) -> bool:
@@ -133,6 +170,10 @@ class GoalEngine(ModuleBase):
         priority: float = 0.5,
         source: str = "input",
         meta: Optional[Dict[str, Any]] = None,
+        *,
+        child_goal_ids: Optional[List[str]] = None,
+        action_items: Optional[List[Any]] = None,
+        parent_goal_id: Optional[str] = None,
     ) -> None:
         """Register an input-derived goal and append to the FIFO queue."""
         with self._lock:
@@ -143,41 +184,133 @@ class GoalEngine(ModuleBase):
                 "timestamp": time.time(),
                 "completed": False,
                 "input_meta": meta or {},
+                "child_goal_ids": list(child_goal_ids) if child_goal_ids else [],
+                "action_items": _normalize_action_items(action_items),
             }
+            if parent_goal_id:
+                self.goals[goal_id]["parent_goal_id"] = parent_goal_id
             if goal_id not in self.input_goal_queue:
                 self.input_goal_queue.append(goal_id)
             self.state["goals"] = self.goals
             self.state["input_goal_queue"] = self.input_goal_queue
 
-    def complete_input_goal(self, goal_id: str) -> bool:
-        """Mark an input goal as completed. Returns True if found and marked."""
+    def _blocked_by_incomplete_children(self, goal_id: str) -> bool:
+        g = self.goals.get(goal_id)
+        if g is None:
+            return True
+        for cid in g.get("child_goal_ids") or []:
+            c = self.goals.get(cid)
+            if c is None or not c.get("completed"):
+                return True
+        return False
+
+    def _pending_actions_remain(self, goal_id: str) -> bool:
+        g = self.goals.get(goal_id)
+        if not g:
+            return True
+        for it in g.get("action_items") or []:
+            if not it.get("done"):
+                return True
+        return False
+
+    def _can_mark_complete(self, goal_id: str) -> bool:
+        if self._blocked_by_incomplete_children(goal_id):
+            return False
+        if self._pending_actions_remain(goal_id):
+            return False
+        return True
+
+    def _drain_completed_input_queue_heads(self) -> None:
+        while self.input_goal_queue:
+            head = self.input_goal_queue[0]
+            head_entry = self.goals.get(head)
+            if head_entry is None:
+                self.input_goal_queue.pop(0)
+                continue
+            if head_entry.get("completed"):
+                self.input_goal_queue.pop(0)
+                continue
+            break
+
+    def _maybe_autocomplete_parents(self, completed_child_id: str) -> None:
+        parents = [
+            pid
+            for pid, ent in self.goals.items()
+            if completed_child_id in (ent.get("child_goal_ids") or [])
+        ]
+        for pid in parents:
+            p = self.goals.get(pid)
+            if p is None or p.get("completed"):
+                continue
+            if not self._can_mark_complete(pid):
+                continue
+            p["completed"] = True
+            p["completed_at"] = time.time()
+            self.state["goals"] = self.goals
+            self._drain_completed_input_queue_heads()
+            self._maybe_autocomplete_parents(pid)
+
+    def complete_goal(self, goal_id: str) -> bool:
+        """Mark a goal completed only when all child goals and action items are done.
+
+        Parents are auto-completed when their last required child completes.
+        """
         with self._lock:
             entry = self.goals.get(goal_id)
             if entry is None or entry.get("completed"):
                 return False
+            if not self._can_mark_complete(goal_id):
+                return False
             entry["completed"] = True
-            # Drain completed (or orphaned) ids from the head of the queue
-            while self.input_goal_queue:
-                head = self.input_goal_queue[0]
-                head_entry = self.goals.get(head)
-                if head_entry is None:
-                    self.input_goal_queue.pop(0)
-                    continue
-                if head_entry.get("completed"):
-                    self.input_goal_queue.pop(0)
-                    continue
-                break
+            entry["completed_at"] = time.time()
             self.state["goals"] = self.goals
-            self.state["input_goal_queue"] = self.input_goal_queue
+            self._drain_completed_input_queue_heads()
+            self._maybe_autocomplete_parents(goal_id)
             return True
 
+    def complete_input_goal(self, goal_id: str) -> bool:
+        """Same as :meth:`complete_goal` (FIFO input goals use the same rules)."""
+        return self.complete_goal(goal_id)
+
+    def mark_action_done(self, goal_id: str, action_id: str) -> bool:
+        """Mark one action item under *goal_id* done; may complete the goal and roll up."""
+        with self._lock:
+            g = self.goals.get(goal_id)
+            if g is None or g.get("completed"):
+                return False
+            found = False
+            for it in g.get("action_items") or []:
+                if str(it.get("id")) == str(action_id):
+                    it["done"] = True
+                    found = True
+                    break
+            if not found:
+                return False
+            self.state["goals"] = self.goals
+            if self._can_mark_complete(goal_id):
+                g["completed"] = True
+                g["completed_at"] = time.time()
+                self.state["goals"] = self.goals
+                self._drain_completed_input_queue_heads()
+                self._maybe_autocomplete_parents(goal_id)
+            return True
+
+    def prioritize_workfront(self) -> List[str]:
+        """Like :meth:`prioritize` but omits goals blocked by incomplete child goals."""
+        self.prioritize()
+        with self._lock:
+            return [gid for gid in self.priorities if not self._blocked_by_incomplete_children(gid)]
+
     def current_input_goal(self) -> Optional[str]:
-        """Return the oldest incomplete input goal id, or None."""
+        """Return the oldest incomplete, unblocked-by-children input goal id, or None."""
         with self._lock:
             for gid in self.input_goal_queue:
                 g = self.goals.get(gid)
-                if g is not None and not g.get("completed"):
-                    return gid
+                if g is None or g.get("completed"):
+                    continue
+                if self._blocked_by_incomplete_children(gid):
+                    continue
+                return gid
             return None
 
     def prioritize(self):
@@ -226,6 +359,9 @@ class GoalEngine(ModuleBase):
             if len(agent_log) > 200:
                 self.trace_log[agent] = agent_log[-200:]
             self.state["trace_log"] = self.trace_log
+        olow = (outcome or "").strip().lower()
+        if olow in ("completed", "success", "done", "succeeded"):
+            self.complete_goal(goal_id)
 
     def get_summary(self) -> Dict[str, Any]:
         with self._lock:

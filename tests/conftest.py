@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import subprocess
+import sys
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
@@ -12,6 +15,25 @@ from tests._import_guard import prepare_test_imports
 # Before any agent/core imports: avoid sentence_transformers→torch during collection
 # (Windows hosts may crash loading torch DLLs even when SBERT is unused).
 prepare_test_imports(__file__)
+
+_ROOT = Path(__file__).resolve().parents[1]
+_ESSENCE = _ROOT / "soul" / "essence.json"
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _ensure_soul_json():
+    """Fresh clones omit tracked soul/*.json; generate stock soul before boot tests."""
+    if _ESSENCE.is_file():
+        return
+    gen = _ROOT / "scripts" / "generate_soul.py"
+    if not gen.is_file():
+        return
+    subprocess.run(
+        [sys.executable, str(gen), "--defaults"],
+        cwd=str(_ROOT),
+        check=True,
+    )
+
 
 if TYPE_CHECKING:
     from agents.boot_agent import BootAgent
