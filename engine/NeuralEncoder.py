@@ -27,7 +27,7 @@ try:
     import numpy as np
 
     _TORCH_AVAILABLE = True
-except ImportError:
+except (ImportError, OSError):
     _TORCH_AVAILABLE = False
     np = None  # type: ignore
 
@@ -40,7 +40,7 @@ try:
     from transformers import AutoTokenizer, AutoModel
 
     _HF_AVAILABLE = True
-except ImportError:
+except (ImportError, OSError):
     _HF_AVAILABLE = False
 
 

@@ -8,6 +8,12 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import pytest
+
+from tests._import_guard import skip_unless_torch_imports
+
+skip_unless_torch_imports()
+
 from agents.persona_agent import PersonaAgent
 from mind.cognitive_contracts import (
     CHAT_RESPONSE_UNKNOWN,
@@ -16,6 +22,8 @@ from mind.cognitive_contracts import (
     run_llm_context_reasoning,
     truncate_chat_at_end_marker,
 )
+
+pytestmark = pytest.mark.torch
 
 
 class _SlowBackend:

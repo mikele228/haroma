@@ -14,6 +14,7 @@
 | [Getting Started](getting-started.md) | Hardware requirements, install, **`setup_wizard.py`**, launch |
 | [Architecture Overview](architecture.md) | **Canonical** topology: `agents/` + Flask, threading, mermaid diagrams |
 | [Architecture audit](architecture-audit.md) | Concurrency, trust boundaries, risks, gaps, recommendations |
+| [Production hardening](production-hardening.md) | Bind/TLS, bearer paths, rate limits, ops checklist for non-dev deploys |
 | [Lab research](lab-research.md) | Run manifest, `X-Experiment-Id`, `/research/manifest`, `/research/snapshot`, env logging |
 | [The Cognitive Cycle](cognitive-cycle.md) | Step-by-step walkthrough of the 40+ stage `run_cycle` |
 | [Memory Forest](memory-forest.md) | Trees, branches, nodes, semantic indexing, thread safety |

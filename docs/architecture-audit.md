@@ -56,7 +56,7 @@ HaromaX6 is a **modular cognitive server**: Flask exposes a wide HTTP API; **Boo
 ### Platform and lifecycle
 
 - **Port 8193 cleanup** uses **Windows-specific** `netstat`/`taskkill` in `launch()` — non-portable; Linux deployments need equivalent or disable.
-- **Global `boot_agent`** in `elarion_server_v2` — simplifies handlers but complicates **multi-instance** or **tests** that need isolation.
+- **One cognitive stack per process** — HTTP runtime state (`BootAgent`, sensor poller, async chat registry) is stored on the Flask app via :func:`mind.server_state.get_haroma_server_state` (``HAROMA_FLASK_EXTENSION_KEY``; see [`mind/server_state.py`](../mind/server_state.py), [`mind/elarion_server_v2.py`](../mind/elarion_server_v2.py)). There is still **one** booted graph per Werkzeug worker; tests should use ``get_haroma_server_state(app)`` or replace that state object rather than relying on removed module-level globals.
 
 ### Real-time and safety
 
@@ -73,8 +73,17 @@ HaromaX6 is a **modular cognitive server**: Flask exposes a wide HTTP API; **Boo
 | Item | Details |
 |------|---------|
 | **Optional bearer auth** | ``HAROMA_HTTP_BEARER_TOKEN`` + ``HAROMA_HTTP_PROTECT_PATHS`` — :mod:`mind.http_server_guards` runs on selected routes (default: ``/agent/environment``, ``/robot/bridge/feedback``, ``/teach``, ``/save``). |
+| **Production checklist** | Ordered bind/TLS/auth/rate-limit/ops steps: [Production hardening](production-hardening.md). |
+| **Client IP behind proxy** | [`mind/client_ip.py`](../mind/client_ip.py): optional `X-Forwarded-For` when the direct peer is trusted — aligns rate limits and structured logs with real clients. |
+| **GET poll abuse** | Optional `HAROMA_HTTP_GET_RATE_LIMIT_PER_MIN` on `/chat/result`; save summary includes `persist_status` / `persist_error_keys` when components fail. |
+| **Flask app state** | [`mind/server_state.py`](../mind/server_state.py): ``HAROMA_FLASK_EXTENSION_KEY`` + :func:`get_haroma_server_state` — `BootAgent`, sensor poller, async chat registry on the Flask app; :func:`mind.elarion_server_v2._haroma` uses :data:`flask.current_app` when an app context is active (else the module ``app``), so tests and future app factories see the right state. |
+| **Idempotent boot** | :func:`mind.elarion_server_v2._init` holds a lock and skips if ``boot_agent`` is already set — avoids duplicate graphs if ``launch()`` were invoked more than once. |
+| **HTTP readiness** | :func:`mind.elarion_server_v2._require_boot_with_input` / ``_require_boot_with_shared`` centralize 503 payloads so route handlers do not duplicate readiness checks. |
 | **HTTP hardening & observability** | In-process **rate limiting** (`HAROMA_HTTP_RATE_LIMIT_PER_MIN`), **`429`** + **`Retry-After`**, **`X-Haroma-Request-Id`** on all responses, optional **stderr JSON access logs** (`HAROMA_STRUCTURED_LOG`, `event=http_access`). |
 | **Lab / research** | Run manifest, experiment id threading, `/research/snapshot`, optional **`HAROMA_LAB_LOG`**. |
+| **HTTP bridge/env tests** | [`tests/test_http_bridge_env_contract.py`](../tests/test_http_bridge_env_contract.py) — Flask test client for ``POST /agent/environment`` and ``POST /robot/bridge/feedback`` with mocked ``shared`` (no full boot). Async chat HTTP coverage in [`tests/test_elarion_chat_async_http.py`](../tests/test_elarion_chat_async_http.py). |
+| **POSIX stale port** | Non-Windows: :func:`mind.elarion_server_v2._kill_port_posix` uses ``lsof`` (if installed) to SIGTERM other listeners on the configured HTTP port before bind — mirrors Windows ``taskkill`` behavior for local dev. |
+| **Pytest import hygiene** | [`tests/_import_guard.py`](../tests/_import_guard.py): ``prepare_test_imports`` stubs optional ``sentence_transformers`` before heavy Haroma imports; ``torch_loads_in_subprocess`` / ``skip_unless_torch_imports`` use a **subprocess** ``import torch`` probe (cached) so broken PyTorch DLLs on Windows do not abort collection. ``HAROMA_SKIP_TORCH_TESTS=1`` skips torch-dependent tests without probing. Torch-heavy tests are marked ``@pytest.mark.torch`` (``pytest -m "not torch"`` deselects them). |
 
 ---
 
@@ -83,11 +92,11 @@ HaromaX6 is a **modular cognitive server**: Flask exposes a wide HTTP API; **Boo
 | Priority | Item |
 |----------|------|
 | High | **TLS + reverse proxy** when exposing beyond localhost (bearer alone is not enough on untrusted networks). |
-| High | **Integration tests** for HTTP bridge and env POSTs (Flask test client) to lock contract behavior. |
+| Medium | **End-to-end HTTP** tests against a live booted server (optional; contract tests above cover route wiring with mocks). |
 | Medium | **Narrower interfaces** — facades or read-only views of `SharedResources` per agent to reduce accidental coupling. |
 | Medium | **Optional JSON logs** for bridge/env POST **bodies** (redact secrets) keyed by **`X-Haroma-Request-Id`** — correlation exists; per-route payload logging still optional. |
-| Low | **Replace globals** in server module with an app factory / context object for testability. |
-| Low | **Cross-platform** port binding and stale-process handling for non-Windows (Windows-only `taskkill` path in `launch()`; POSIX is a no-op). |
+| Low | **Full app factory** (build Flask app + register all routes in one callable) — optional; runtime state is already per-app via :func:`mind.server_state.get_haroma_server_state` and :func:`mind.elarion_server_v2._haroma` resolves :data:`flask.current_app` when a context is active. |
+| Low | **Port bind failures** on busy ports without `lsof` (POSIX) or when stale listeners ignore SIGTERM — rare in dev; production uses process managers. |
 
 ---
 
@@ -97,7 +106,7 @@ HaromaX6 is a **modular cognitive server**: Flask exposes a wide HTTP API; **Boo
 2. **Keep motor torque and safety** on the robot stack; use Haroma only for **supervisory commands and fused state** per [robot-cognitive-control-split.md](robot-cognitive-control-split.md).
 3. **When extending `SharedResources`**, document **which lock** protects new fields and add **tests** that exercise concurrent read/write paths if relevant.
 4. **Keep** `docs/api-reference.md` aligned with `build_http_status_payload` when adding fields (CI or manual check on release).
-5. **Run CI** with `pytest -m "not integration"` for fast feedback; reserve integration markers for real LLM or long-running paths.
+5. **Run CI** with `pytest -m "not integration"` for fast feedback; add `and not torch` when the runner has no working PyTorch (see [`tests/_import_guard.py`](../tests/_import_guard.py) and the ``torch`` marker in [`pytest.ini`](../pytest.ini)). Reserve the **integration** marker for real LLM or long-running paths.
 
 ---
 

@@ -1,13 +1,24 @@
 """Tests for CognitiveBackbone — classic and MLA-lite architectures."""
 
-import sys, os, pytest
+import os
+import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-torch = pytest.importorskip("torch")
+from tests._import_guard import skip_unless_torch_imports
+
+skip_unless_torch_imports()
+
+import pytest
+
+try:
+    import torch
+except (ImportError, OSError):
+    pytest.skip("torch unavailable", allow_module_level=True)
 
 from engine.CognitiveBackbone import CognitiveBackbone, build_snapshot, _SNAPSHOT_DIM, _Z_DIM
 
+pytestmark = pytest.mark.torch
 
 # ── helpers ──────────────────────────────────────────────────────────
 

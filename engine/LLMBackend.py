@@ -36,25 +36,58 @@ import threading
 from typing import Dict, Any, List, Optional, Tuple
 from collections import deque
 
-try:
-    import torch
-    import torch.nn as nn
+# Torch is imported lazily via _torch_ok() — a top-level ``import torch`` runs when
+# ``from engine.LLMBackend import LLMBackend`` executes and can hard-crash fragile
+# Windows installs before any exception is raised.
+_torch_mod: Any = None
+_nn_mod: Any = None
+_TORCH_PROBE: Optional[bool] = None
 
-    _TORCH = True
-except ImportError:
-    _TORCH = False
+
+def _torch_ok() -> bool:
+    """Return True if torch imported successfully (cached). Never runs at module import time."""
+    global _torch_mod, _nn_mod, _TORCH_PROBE
+    if _TORCH_PROBE is not None:
+        return _TORCH_PROBE
+    try:
+        import torch
+        import torch.nn as nn
+
+        _torch_mod = torch
+        _nn_mod = nn
+        _TORCH_PROBE = True
+    except (ImportError, OSError):
+        _torch_mod = None
+        _nn_mod = None
+        _TORCH_PROBE = False
+    return bool(_TORCH_PROBE)
+
 
 _DEFAULT_MODEL_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     "models",
 )
 
-try:
-    from llama_cpp import Llama
+# Defer ``from llama_cpp import Llama`` until first GGUF load. Importing llama_cpp
+# loads native DLLs; doing that at ``import engine.LLMBackend`` time can hard-crash
+# the process on some Windows setups before any Python exception is raised.
+_Llama_ctor: Optional[Any] = None
+_llama_import_attempted: bool = False
 
-    _LLAMA_CPP = True
-except ImportError:
-    _LLAMA_CPP = False
+
+def _get_llama_ctor() -> Optional[Any]:
+    """Return ``llama_cpp.Llama`` or ``None`` if import failed."""
+    global _Llama_ctor, _llama_import_attempted
+    if _llama_import_attempted:
+        return _Llama_ctor
+    _llama_import_attempted = True
+    try:
+        from llama_cpp import Llama
+
+        _Llama_ctor = Llama
+    except (ImportError, OSError):
+        _Llama_ctor = None
+    return _Llama_ctor
 
 
 def _find_gguf(model_dir: str) -> Optional[str]:
@@ -80,44 +113,50 @@ def _find_gguf(model_dir: str) -> Optional[str]:
     return candidates[0]
 
 
+def _lazy_local_gguf_default() -> bool:
+    """If True, defer ``Llama()`` until first local inference (avoids boot-time native crashes).
+
+    ``HAROMA_LLM_LAZY_LOCAL``: ``1``/``0`` overrides. When unset, Windows defaults to
+    lazy; other platforms default to eager load at init.
+    """
+
+    v = str(os.environ.get("HAROMA_LLM_LAZY_LOCAL", "") or "").strip().lower()
+    if v in ("1", "true", "yes", "on"):
+        return True
+    if v in ("0", "false", "no", "off"):
+        return False
+    return os.name == "nt"
+
+
 _REWARD_EMBED_DIM = 384
 _REWARD_HIDDEN = 256
 _REWARD_REPLAY_CAP = 8192
 
-try:
-    from sentence_transformers import SentenceTransformer as _RewardSBERT
+_REWARD_SBERT_PROBE: Optional[bool] = None
 
-    _HAS_REWARD_SBERT = True
-except ImportError:
-    _HAS_REWARD_SBERT = False
+
+def _sentence_transformers_available() -> bool:
+    """Lazy probe: avoid importing sentence_transformers at LLMBackend import time.
+
+    Importing the package can transitively load torch/HF and worsen fragile Windows setups.
+    """
+    global _REWARD_SBERT_PROBE
+    if _REWARD_SBERT_PROBE is not None:
+        return _REWARD_SBERT_PROBE
+    try:
+        import sentence_transformers  # noqa: F401
+
+        _REWARD_SBERT_PROBE = True
+    except (ImportError, OSError):
+        _REWARD_SBERT_PROBE = False
+    return _REWARD_SBERT_PROBE
+
+
 _FINETUNE_DATA_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     "data",
     "finetune",
 )
-
-if _TORCH:
-
-    class _RewardModelNet(nn.Module):
-        """Predicts response quality from sentence-transformer embeddings (U16).
-
-        Input: concat(prompt_embed, response_embed) -> 2 * _REWARD_EMBED_DIM
-        Architecture scaled to capture semantic nuance.
-        """
-
-        def __init__(self):
-            super().__init__()
-            self.net = nn.Sequential(
-                nn.Linear(_REWARD_EMBED_DIM * 2, _REWARD_HIDDEN),
-                nn.ReLU(),
-                nn.Linear(_REWARD_HIDDEN, 128),
-                nn.ReLU(),
-                nn.Linear(128, 1),
-                nn.Sigmoid(),
-            )
-
-        def forward(self, x: torch.Tensor) -> torch.Tensor:
-            return self.net(x).squeeze(-1)
 
 
 class RewardModel:
@@ -129,33 +168,88 @@ class RewardModel:
     """
 
     def __init__(self, replay_lock: Optional[threading.Lock] = None):
-        self._available = _TORCH
+        # True until _torch_ok() fails in _ensure_torch_reward_head (torch never imported at module load).
+        self._available = True
         self._net = None
         self._optimizer = None
         self._replay: List[Tuple[List[float], float]] = []
         self._pairwise_replay: List[Tuple[List[float], List[float]]] = []
         self._train_steps = 0
         self._sbert = None
+        self._sbert_load_failed = False
+        self._sbert_lock = threading.Lock()
+        self._torch_reward_lock = threading.Lock()
+        self._torch_reward_init_failed = False
         self._lock = replay_lock if replay_lock is not None else threading.Lock()
-
-        if _HAS_REWARD_SBERT:
-            try:
-                from engine.ModelCache import get_sbert
-
-                self._sbert = get_sbert()
-            except Exception as _e:
-                print(f"[SemanticRewardModel] sbert init error: {_e}", flush=True)
-
-        if _TORCH:
-            self._net = _RewardModelNet()
-            self._optimizer = torch.optim.Adam(self._net.parameters(), lr=5e-4)
+        # Defer get_sbert() to first embed — loading MiniLM during LLMBackend init
+        # runs after ReflectionManager and can abort the process (native crash) on some Windows setups.
+        # Defer torch reward MLP + Adam to first score/train_step — constructing nn.Module during
+        # LLMBackend.__init__ can also hard-exit the process when torch DLLs are flaky.
 
     @property
     def available(self) -> bool:
         return self._available and self._net is not None and self._train_steps >= 10
 
+    def _ensure_torch_reward_head(self) -> None:
+        """Lazy-init the small PyTorch MLP; keeps boot from touching torch.nn during LLMBackend()."""
+        if self._net is not None or self._torch_reward_init_failed:
+            return
+        if not _torch_ok():
+            self._torch_reward_init_failed = True
+            self._available = False
+            return
+        with self._torch_reward_lock:
+            if self._net is not None or self._torch_reward_init_failed:
+                return
+            if not _torch_ok() or _torch_mod is None or _nn_mod is None:
+                self._torch_reward_init_failed = True
+                self._available = False
+                return
+            try:
+                torch = _torch_mod
+                nn = _nn_mod
+
+                class _RewardModelNet(nn.Module):
+                    """Small MLP on concat(prompt_embed, response_embed)."""
+
+                    def __init__(self):
+                        super().__init__()
+                        self.net = nn.Sequential(
+                            nn.Linear(_REWARD_EMBED_DIM * 2, _REWARD_HIDDEN),
+                            nn.ReLU(),
+                            nn.Linear(_REWARD_HIDDEN, 128),
+                            nn.ReLU(),
+                            nn.Linear(128, 1),
+                            nn.Sigmoid(),
+                        )
+
+                    def forward(self, x):
+                        return self.net(x).squeeze(-1)
+
+                self._net = _RewardModelNet()
+                self._optimizer = torch.optim.Adam(self._net.parameters(), lr=5e-4)
+            except Exception as _e:
+                self._torch_reward_init_failed = True
+                self._available = False
+                print(f"[SemanticRewardModel] torch reward head init failed: {_e}", flush=True)
+
+    def _ensure_sbert(self) -> None:
+        if self._sbert is not None or self._sbert_load_failed or not _sentence_transformers_available():
+            return
+        with self._sbert_lock:
+            if self._sbert is not None or self._sbert_load_failed:
+                return
+            try:
+                from engine.ModelCache import get_sbert
+
+                self._sbert = get_sbert()
+            except Exception as _e:
+                self._sbert_load_failed = True
+                print(f"[SemanticRewardModel] sbert init error: {_e}", flush=True)
+
     def _text_embed(self, text: str) -> List[float]:
         """Semantic embedding via sentence-transformers; hash fallback."""
+        self._ensure_sbert()
         if self._sbert is not None:
             try:
                 vec = self._sbert.encode(text[:1024], normalize_embeddings=True)
@@ -173,12 +267,16 @@ class RewardModel:
         return [v / norm for v in vec]
 
     def score(self, prompt: str, response: str) -> float:
+        self._ensure_torch_reward_head()
         if not self._available or self._net is None or self._train_steps < 10:
             return 0.5
+        if _torch_mod is None:
+            return 0.5
+        tm = _torch_mod
         embed = self._text_embed(prompt) + self._text_embed(response)
-        with self._lock, torch.no_grad():
+        with self._lock, tm.no_grad():
             self._net.eval()
-            x = torch.tensor([embed], dtype=torch.float32)
+            x = tm.tensor([embed], dtype=tm.float32)
             return float(self._net(x).item())
 
     def record(self, prompt: str, response: str, reward: float):
@@ -202,6 +300,7 @@ class RewardModel:
                 self._pairwise_replay = self._pairwise_replay[-_REWARD_REPLAY_CAP:]
 
     def train_step(self) -> float:
+        self._ensure_torch_reward_head()
         if not self._available or self._net is None:
             return 0.0
         with self._lock:
@@ -210,15 +309,19 @@ class RewardModel:
         total_loss = 0.0
         did_train = False
 
+        if _torch_mod is None or _nn_mod is None:
+            return 0.0
+        tm = _torch_mod
+        nm = _nn_mod
         with self._lock:
             if len(replay_snap) >= 16:
                 batch_size = min(64, len(replay_snap))
                 batch = random.sample(replay_snap, batch_size)
-                x = torch.tensor([b[0] for b in batch], dtype=torch.float32)
-                y = torch.tensor([b[1] for b in batch], dtype=torch.float32)
+                x = tm.tensor([b[0] for b in batch], dtype=tm.float32)
+                y = tm.tensor([b[1] for b in batch], dtype=tm.float32)
                 self._net.train()
                 pred = self._net(x)
-                loss = nn.functional.mse_loss(pred, y)
+                loss = nm.functional.mse_loss(pred, y)
                 self._optimizer.zero_grad()
                 loss.backward()
                 self._optimizer.step()
@@ -228,15 +331,15 @@ class RewardModel:
             if len(pairwise_snap) >= 8:
                 batch_size = min(32, len(pairwise_snap))
                 batch = random.sample(pairwise_snap, batch_size)
-                chosen_x = torch.tensor([b[0] for b in batch], dtype=torch.float32)
-                rejected_x = torch.tensor([b[1] for b in batch], dtype=torch.float32)
+                chosen_x = tm.tensor([b[0] for b in batch], dtype=tm.float32)
+                rejected_x = tm.tensor([b[1] for b in batch], dtype=tm.float32)
                 self._net.train()
                 chosen_score = self._net(chosen_x)
                 rejected_score = self._net(rejected_x)
-                dpo_loss = -torch.log(torch.sigmoid(chosen_score - rejected_score) + 1e-8).mean()
+                dpo_loss = -tm.log(tm.sigmoid(chosen_score - rejected_score) + 1e-8).mean()
                 self._optimizer.zero_grad()
                 dpo_loss.backward()
-                nn.utils.clip_grad_norm_(self._net.parameters(), 1.0)
+                nm.utils.clip_grad_norm_(self._net.parameters(), 1.0)
                 self._optimizer.step()
                 total_loss += dpo_loss.item()
                 did_train = True
@@ -331,7 +434,8 @@ class LLMBackend:
       0. ``use_programmed=True`` — rule-based ``ProgrammedLLMResponder`` (env
          ``HAROMA_LLM_ENGINE=programmed`` or soul ``llm.engine``)
       1. API provider (openai / anthropic / google / ollama) if configured
-      2. Local GGUF via llama-cpp-python
+      2. Local GGUF via llama-cpp-python (on Windows, default ``HAROMA_LLM_LAZY_LOCAL``
+         defers ``Llama()`` until first local inference so boot can finish; set ``0`` to load at init)
       3. Unavailable (template fallback in LanguageComposer)
 
     Parameters
@@ -395,6 +499,8 @@ class LLMBackend:
         self._generation_count = 0
         self._best_of_n_count = 0
         self._gen_lock = threading.Lock()
+        self._local_init_lock = threading.Lock()
+        self._local_pending: Optional[Tuple[str, int, int, bool]] = None
         self._programmed: Optional[Any] = None
 
         if use_programmed and str(os.environ.get("HAROMA_DISABLE_PROGRAMMED_LLM", "") or "").strip().lower() in (
@@ -514,8 +620,6 @@ class LLMBackend:
         2. If ``model_path`` is a directory, scan it for a .gguf file.
         3. Fall back to ``models/`` inside the HaromaX6 project root.
         """
-        if not _LLAMA_CPP:
-            return
         path = model_path
         if path and os.path.isdir(path):
             path = _find_gguf(path)
@@ -525,18 +629,66 @@ class LLMBackend:
             path = _find_gguf(_DEFAULT_MODEL_DIR)
         if path is None or not os.path.isfile(path):
             return
+        n_ctx_i = int(n_ctx)
+        ngl_i = int(n_gpu_layers)
+        ver_b = bool(verbose)
+        if _lazy_local_gguf_default():
+            self._local_pending = (path, n_ctx_i, ngl_i, ver_b)
+            self._model_name = os.path.basename(path)
+            print(
+                f"[LLMBackend] Local GGUF deferred until first use: {self._model_name} "
+                f"(set HAROMA_LLM_LAZY_LOCAL=0 to load during boot)",
+                flush=True,
+            )
+            return
+        ctor = _get_llama_ctor()
+        if ctor is None:
+            return
         try:
-            self._model = Llama(
+            self._model = ctor(
                 model_path=path,
-                n_ctx=n_ctx,
-                n_gpu_layers=n_gpu_layers,
-                verbose=verbose,
+                n_ctx=n_ctx_i,
+                n_gpu_layers=ngl_i,
+                verbose=ver_b,
             )
             self._model_name = os.path.basename(path)
             print(f"[LLMBackend] Local: {self._model_name}", flush=True)
         except Exception as exc:
-            print(f"[LLMBackend] Failed to load model {path}: {exc}")
+            print(f"[LLMBackend] Failed to load model {path}: {exc}", flush=True)
             self._model = None
+
+    def _ensure_local_model(self) -> None:
+        """Load GGUF on first use when boot used lazy local init."""
+        if self._model is not None:
+            return
+        pend = self._local_pending
+        if not pend:
+            return
+        ctor = _get_llama_ctor()
+        if ctor is None:
+            self._local_pending = None
+            return
+        with self._local_init_lock:
+            if self._model is not None:
+                return
+            if self._local_pending is None:
+                return
+            path, n_ctx_i, ngl_i, ver_b = self._local_pending
+            try:
+                print(f"[LLMBackend] Loading local GGUF: {os.path.basename(path)} …", flush=True)
+                self._model = ctor(
+                    model_path=path,
+                    n_ctx=n_ctx_i,
+                    n_gpu_layers=ngl_i,
+                    verbose=ver_b,
+                )
+                self._model_name = os.path.basename(path)
+                print(f"[LLMBackend] Local: {self._model_name}", flush=True)
+            except Exception as exc:
+                print(f"[LLMBackend] Failed to load model {path}: {exc}", flush=True)
+                self._model = None
+            finally:
+                self._local_pending = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -545,7 +697,10 @@ class LLMBackend:
     @property
     def available(self) -> bool:
         return (
-            self._programmed is not None or self._model is not None or self._api_client is not None
+            self._programmed is not None
+            or self._model is not None
+            or self._local_pending is not None
+            or self._api_client is not None
         )
 
     @property
@@ -558,7 +713,7 @@ class LLMBackend:
             return "programmed"
         if self._api_client is not None:
             return f"api:{self._api_provider}"
-        if self._model is not None:
+        if self._model is not None or self._local_pending is not None:
             return "local"
         return "none"
 
@@ -575,7 +730,7 @@ class LLMBackend:
             return self._programmed.generate(prompt, max_tokens, temperature)
         if self._api_client is not None:
             return self._generate_api(prompt, max_tokens, temperature)
-        if self._model is not None:
+        if self._model is not None or self._local_pending is not None:
             return self._generate_local(prompt, max_tokens, temperature, top_p, stop)
         return None
 
@@ -617,7 +772,7 @@ class LLMBackend:
             )
         if self._api_client is not None:
             return self._generate_api_chat(messages, mt, temp)
-        if self._model is not None:
+        if self._model is not None or self._local_pending is not None:
             prompt = self._messages_to_local_prompt(messages)
             return self._generate_local(prompt, mt, temp, top_p, stop)
         return None
@@ -732,7 +887,10 @@ class LLMBackend:
         top_p: float,
         stop: Optional[List[str]],
     ) -> Optional[str]:
+        self._ensure_local_model()
         with self._gen_lock:
+            if self._model is None:
+                return None
             try:
                 result = self._model(
                     prompt,
@@ -762,6 +920,12 @@ class LLMBackend:
         Env ``HAROMA_LLM_WARMUP`` (default ``1``): set ``0`` / ``off`` to skip.
         Env ``HAROMA_LLM_WARMUP_MAX_TOKENS`` (default ``24``): cap decode length.
         """
+        if self._local_pending is not None and self._model is None:
+            print(
+                "[LLMBackend] Warmup skipped (lazy local GGUF — loads on first chat)",
+                flush=True,
+            )
+            return False
         if self._model is None:
             return False
         flag = str(os.environ.get("HAROMA_LLM_WARMUP", "1") or "1").strip().lower()
@@ -885,6 +1049,7 @@ class LLMBackend:
         """
         if self._programmed is not None:
             return self._programmed.generate(prompt, max_tokens=max_tokens, temperature=temperature)
+        self._ensure_local_model()
         if self._model is None:
             return None
         with self._gen_lock:

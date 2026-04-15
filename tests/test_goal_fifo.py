@@ -12,6 +12,8 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+from tests._import_guard import torch_loads_in_subprocess
+
 from core.Goal import GoalEngine, reset_shared_goal_engine_for_tests
 
 
@@ -257,6 +259,11 @@ class TestInputAgentGoalDispatch:
 
 
 class TestGoalManagerWrappers:
+    @pytest.mark.torch
+    @pytest.mark.skipif(
+        not torch_loads_in_subprocess(),
+        reason="torch not loadable (mind.manager pulls torch-dependent engines)",
+    )
     def test_register_and_complete(self):
         from mind.manager import GoalManager
 
@@ -270,6 +277,11 @@ class TestGoalManagerWrappers:
         finally:
             reset_shared_goal_engine_for_tests()
 
+    @pytest.mark.torch
+    @pytest.mark.skipif(
+        not torch_loads_in_subprocess(),
+        reason="torch not loadable (mind.manager pulls torch-dependent engines)",
+    )
     def test_goal_managers_share_one_engine(self):
         from mind.manager import GoalManager
 

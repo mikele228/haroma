@@ -4,7 +4,7 @@
 
 Elarion can perceive the physical world through hardware sensors. The sensor layer supports both **pull** (polling) and **push** (HTTP POST) models, with adapters for 10 sensor types.
 
-Implemented in [`sensors/adapters.py`](../sensors/adapters.py).
+Implemented in [`sensors/adapters.py`](../sensors/adapters.py). A stable **sense-domain** label for any `channel` string (including aliases like `cam`, `mic`, `imu`) is defined in [`sensors/domains.py`](../sensors/domains.py) and returned on `POST /sensor` as `sense_domain`.
 
 Sensors feed the **embodied** side of the minded model: perception enters **Law** (the cycle), is fused with text when configured, and lands in **Memory** after consolidation — the **Brain CPU** reasons over a snapshot that includes body-state. See **[Minded architecture](minded-architecture-metaphor.md)**.
 
@@ -67,6 +67,27 @@ flowchart LR
 Each adapter inherits from `SensorAdapter` and implements:
 - `poll() -> dict` — read current sensor value
 - `is_available() -> bool` — check if hardware is connected
+
+---
+
+## Sense domains (taxonomy)
+
+Classical **five senses** map to: **vision**, **audition** (channel `audio`), **touch**, **olfaction** (`smell`), **gustation** (`taste`). **Beyond those**, Haroma uses separate domains for **thermal/IR** (`infrared`), **spatial range** (LiDAR / depth geometry), **spatial global** (GNSS), and **proprioception** (IMU — accelerometer/gyro; vestibular/balance cues are grouped here). **Embodiment context** applies to `channel` values `agent_environment` / `environment` when posting a structured world snapshot.
+
+| `SenseDomain` value | Typical channels / aliases |
+|---------------------|----------------------------|
+| `vision` | `vision`, `cam`, `camera`, `webcam` |
+| `audition` | `audio`, `mic`, `microphone`, `sound` |
+| `touch` | `touch`, `tactile`, `pressure` |
+| `olfaction` | `smell`, `gas`, `olfaction` |
+| `gustation` | `taste`, `gustation` |
+| `thermal_radiance` | `infrared`, `ir`, `thermal` |
+| `spatial_range` | `lidar`, `depth`, `tof`, `pointcloud` |
+| `spatial_global` | `gps`, `gnss`, `location` |
+| `proprioception` | `proprioception`, `imu`, `gyro`, `vestibular`, `balance` |
+| `embodiment_context` | `agent_environment`, `environment` |
+
+Use `from sensors.domains import resolve_channel_to_domain` (or import from `sensors`) to resolve a string to `SenseDomain`. Successful `POST /sensor` responses include `sense_domain` alongside `channel`.
 
 ---
 

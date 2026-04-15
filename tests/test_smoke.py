@@ -5,11 +5,17 @@ a chat message end-to-end without waiting for the full dense index build.
 Patches _prewarm_memory_index to skip the slow TF-IDF/dense rebuild.
 """
 
-import sys
 import os
+import sys
 import time
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO not in sys.path:
+    sys.path.insert(0, _REPO)
+
+from tests._import_guard import prepare_test_imports
+
+prepare_test_imports(__file__)
 
 
 def banner(text):

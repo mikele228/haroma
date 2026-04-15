@@ -36,8 +36,11 @@ These are **optional** and controlled by environment variables (process-wide, in
 
 | Variable | Effect |
 |----------|--------|
-| **`HAROMA_HTTP_RATE_LIMIT_PER_MIN`** | If set to a **positive integer**, limits **POST** requests per client IP **per route** in a sliding ~60s window. **`0` or unset** = off. Applies to: `/chat`, `/sensor`, `/agent/environment`, `/robot/bridge/feedback`, `/teach`, `/save`. Over limit → **`429`** with JSON `{"error":"rate_limited","request_id":...}`, header **`Retry-After: 60`**, and **`X-Haroma-Request-Id`**. |
-| **`HAROMA_STRUCTURED_LOG`** | `1` / `true` / `yes` / `on` — one JSON line per HTTP **response** on **stderr** (`event=http_access`, `request_id`, `status`, `duration_ms`, `method`, `path`, `remote`, optional `experiment_id` when the lab hook ran). |
+| **`HAROMA_HTTP_RATE_LIMIT_PER_MIN`** | If set to a **positive integer**, limits **POST** requests per client IP **per route** in a sliding ~60s window. **`0` or unset** = off. Applies to: `/chat`, `/sensor`, `/agent/environment`, `/robot/bridge/feedback`, `/teach`, `/save`. Over limit → **`429`** with JSON `{"error":"rate_limited","request_id":...}`, header **`Retry-After: 60`**, and **`X-Haroma-Request-Id`**. Client IP uses [`mind/client_ip.py`](../mind/client_ip.py) (see rows below). |
+| **`HAROMA_HTTP_GET_RATE_LIMIT_PER_MIN`** | Optional: limits **GET** `/chat/result` polls per client IP per minute (same sliding window). **`0` or unset** = off. Does **not** apply to `/status` (use your proxy for probe abuse). |
+| **`HAROMA_HTTP_USE_X_FORWARDED_FOR`** | `1` / `true` / `yes` / `on` — use the **leftmost** valid address in `X-Forwarded-For` for rate limits and structured logs **only when** the direct peer is **trusted** (loopback, or `HAROMA_HTTP_TRUSTED_PROXIES`). Prevents header spoofing from untrusted clients. **Unset** = use `remote_addr` only. |
+| **`HAROMA_HTTP_TRUSTED_PROXIES`** | Comma-separated **IP addresses or CIDRs** for reverse proxies that may append `X-Forwarded-For`. Loopback peers are always trusted when `HAROMA_HTTP_USE_X_FORWARDED_FOR` is on. |
+| **`HAROMA_STRUCTURED_LOG`** | `1` / `true` / `yes` / `on` — one JSON line per HTTP **response** on **stderr** (`event=http_access`, `request_id`, `status`, `duration_ms`, `method`, `path`, `remote`, optional `experiment_id` when the lab hook ran). The `remote` field follows the same rules as rate limiting ([`mind/client_ip.py`](../mind/client_ip.py)). |
 | **`HAROMA_LAB_LOG`** | `1` / `true` / `yes` / `on` — one **stdout** line when a lab route records an **`experiment_id`** (see [Lab research](lab-research.md)). |
 
 **`before_request` order:** assign **`X-Haroma-Request-Id`** → bearer check (if configured) → rate limit → lab experiment id parsing. **`after_request`** attaches the response header and optional structured stderr line.
@@ -111,7 +114,7 @@ Actual keys vary with configuration; responses may include **`experiment_id`** /
 
 **Error responses:**
 - `400` — empty or oversized message
-- `429` — rate limited when **`HAROMA_HTTP_RATE_LIMIT_PER_MIN`** is set to a positive value
+- `429` — rate limited when **`HAROMA_HTTP_RATE_LIMIT_PER_MIN`** or **`HAROMA_HTTP_GET_RATE_LIMIT_PER_MIN`** is set to a positive value (POST vs GET paths; see env table)
 - `503` — server still booting
 - `504` — timeout waiting for the reply
 
@@ -137,11 +140,13 @@ Push external sensor data into the buffer for consumption by the next cycle.
 ```json
 {
   "status": "buffered",
-  "channel": "temperature"
+  "channel": "temperature",
+  "sense_domain": "unknown",
+  "buffer": {}
 }
 ```
 
-The `channel` field identifies the sensor type. The `data` field can be any JSON — it passes through to the cognitive cycle as-is.
+The `channel` field identifies the sensor type. **`sense_domain`** is a stable modality label from [`sensors/domains.py`](../sensors/domains.py) (e.g. `vision`, `audition`, `spatial_global`); unknown or custom channel names resolve to `"unknown"`. The `data` field can be any JSON — it passes through to the cognitive cycle as-is. When `channel` is `agent_environment` or `environment`, the response uses `"status": "stored"` and omits `buffer` (see [Sensor Integration](sensors.md#sense-domains-taxonomy)).
 
 ---
 
@@ -248,9 +253,15 @@ Trigger a manual save of all cognitive state. May require bearer token when **`H
 ```json
 {
   "status": "saved",
-  "details": {}
+  "details": {
+    "persist_status": "ok",
+    "memory_forest": "ok (no changes)",
+    "emotion_model": "ok"
+  }
 }
 ```
+
+When some components fail, `details.persist_status` is **`degraded`**, `details.persist_error_keys` lists failing keys, and stderr prints a **`[Persistence] save degraded`** line. Per-component values look like **`error: ...`** strings.
 
 ---
 

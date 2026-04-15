@@ -10,14 +10,24 @@ sends messages through the InputAgent, and verifies:
   4. Responses flow back through response slots
 """
 
-import sys
+from __future__ import annotations
+
 import os
-import time
+import sys
 import threading
+import time
+from typing import TYPE_CHECKING
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO not in sys.path:
+    sys.path.insert(0, _REPO)
 
-from agents.boot_agent import BootAgent
+from tests._import_guard import prepare_test_imports
+
+prepare_test_imports(__file__)
+
+if TYPE_CHECKING:
+    from agents.boot_agent import BootAgent
 
 
 _DELEGATION_LOG = []
@@ -244,6 +254,8 @@ def test_health_check(boot: BootAgent):
 
 
 def main():
+    from agents.boot_agent import BootAgent
+
     banner("ELARION v6 TRUESELF ARCHITECTURE TEST")
     print("  Testing: Boot -> Input -> TrueSelf -> Fast-Path / Delegate")
     print("  TrueSelf: executive consciousness (sole input receiver)")

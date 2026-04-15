@@ -120,6 +120,8 @@ Profiles:
 
 `python main.py` loads `.env` from the project root via [`mind/deploy_config.py`](../mind/deploy_config.py). You can also start from [`.env.example`](../.env.example) and edit by hand.
 
+For non-development deployments (bind address, TLS, bearer scope, rate limits, ops), use **[Production hardening](production-hardening.md)**.
+
 ---
 
 ## 3. Launch

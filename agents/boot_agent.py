@@ -224,8 +224,10 @@ class BootAgent(BaseAgent):
         The BackgroundAgent will incrementally rebuild TF-IDF and dense
         indexes during its normal ticks.  Boot does nothing blocking.
         """
+        from core.cognitive_null import is_cognitive_null
+
         mem = self.shared.memory
-        if mem is None:
+        if mem is None or is_cognitive_null(mem):
             return
         si = mem.semantic_index
         if si is None:
@@ -241,8 +243,11 @@ class BootAgent(BaseAgent):
 
     def start_all(self):
         """Start every child agent, then start the supervisor loop."""
-        if self.shared.persistence:
-            if not self.shared.persistence.wait_for_deferred(timeout=60.0):
+        from core.cognitive_null import is_cognitive_null
+
+        pers = self.shared.persistence
+        if pers and not is_cognitive_null(pers):
+            if not pers.wait_for_deferred(timeout=60.0):
                 print("[BootAgent] WARNING: deferred loads did not complete within 60s", flush=True)
         with self._persona_lock:
             agents = list(self._all_agents)

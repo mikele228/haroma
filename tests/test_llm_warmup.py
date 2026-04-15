@@ -7,7 +7,15 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import pytest
+
+from tests._import_guard import skip_unless_torch_imports
+
+skip_unless_torch_imports()
+
 from engine.LLMBackend import LLMBackend
+
+pytestmark = pytest.mark.torch
 
 
 def test_warmup_skips_when_no_local_model():

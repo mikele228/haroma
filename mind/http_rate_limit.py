@@ -1,13 +1,19 @@
 """
-Simple in-memory sliding-window rate limit for selected HTTP POST routes.
+Simple in-memory sliding-window rate limit for selected HTTP routes.
 
 Env:
 
-* ``HAROMA_HTTP_RATE_LIMIT_PER_MIN`` — max requests per client IP per route per minute.
-  ``0`` (default) disables rate limiting.
+* ``HAROMA_HTTP_RATE_LIMIT_PER_MIN`` — max **POST** requests per client IP per route
+  per minute (selected paths). ``0`` (default) disables.
+* ``HAROMA_HTTP_GET_RATE_LIMIT_PER_MIN`` — max **GET** requests per IP per route per
+  minute for high-frequency poll routes (e.g. ``/chat/result``). ``0`` (default) disables.
 
 Uses a fixed 60-second window (approximate; good enough for abuse mitigation).
 Thread-safe for Flask ``threaded=True``.
+
+Client identity uses :func:`mind.client_ip.get_effective_client_ip` so limits work
+behind a reverse proxy when ``HAROMA_HTTP_USE_X_FORWARDED_FOR`` and trusted peers
+are configured.
 """
 
 from __future__ import annotations
@@ -18,6 +24,8 @@ import time
 from collections import defaultdict, deque
 from typing import Any, Dict, Optional, Tuple
 
+from mind.client_ip import get_effective_client_ip
+
 _RATE_LOCK = threading.Lock()
 # (ip, path) -> deque of request epoch times
 _BUCKETS: Dict[Tuple[str, str], deque] = defaultdict(lambda: deque())
@@ -25,7 +33,7 @@ _BUCKETS: Dict[Tuple[str, str], deque] = defaultdict(lambda: deque())
 # Sliding window length (seconds); also used for ``Retry-After`` on HTTP 429.
 RATE_LIMIT_WINDOW_SEC = 60.0
 
-_LIMITED_PATHS = frozenset(
+_LIMITED_POST_PATHS = frozenset(
     {
         "/chat",
         "/sensor",
@@ -33,6 +41,13 @@ _LIMITED_PATHS = frozenset(
         "/robot/bridge/feedback",
         "/teach",
         "/save",
+    }
+)
+
+# Polling / high-frequency GET (optional cap separate from POST)
+_GET_LIMITED_PATHS = frozenset(
+    {
+        "/chat/result",
     }
 )
 
@@ -47,16 +62,30 @@ def rate_limit_per_minute() -> int:
         return 0
 
 
+def get_rate_limit_per_minute() -> int:
+    """Optional GET rate limit for poll routes (``HAROMA_HTTP_GET_RATE_LIMIT_PER_MIN``)."""
+    raw = str(os.environ.get("HAROMA_HTTP_GET_RATE_LIMIT_PER_MIN", "") or "").strip()
+    if not raw:
+        return 0
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return 0
+
+
 def check_rate_limit(request: Any) -> Optional[Tuple[Dict[str, Any], int]]:
     """Return ``(error_body, 429)`` if over limit, else ``None``."""
-    cap = rate_limit_per_minute()
+    path = getattr(request, "path", "") or ""
+    method = (getattr(request, "method", "") or "").upper()
+    cap = 0
+    if method == "POST" and path in _LIMITED_POST_PATHS:
+        cap = rate_limit_per_minute()
+    elif method == "GET" and path in _GET_LIMITED_PATHS:
+        cap = get_rate_limit_per_minute()
     if cap <= 0:
         return None
-    path = getattr(request, "path", "") or ""
-    if path not in _LIMITED_PATHS or getattr(request, "method", "") != "POST":
-        return None
-    ip = getattr(request, "remote_addr", None) or "unknown"
-    key = (str(ip)[:64], path)
+    ip = get_effective_client_ip(request)
+    key = (str(ip)[:64], path, method)
     now = time.time()
     window = RATE_LIMIT_WINDOW_SEC
     with _RATE_LOCK:

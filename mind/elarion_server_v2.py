@@ -80,6 +80,11 @@ readiness); ``X-Experiment-Id`` / JSON ``experiment_id`` on chat and env routes.
 **HTTP rate limit (optional):** ``HAROMA_HTTP_RATE_LIMIT_PER_MIN`` — max POSTs per client
 IP per route per minute on ``/chat``, ``/sensor``, ``/agent/environment``,
 ``/robot/bridge/feedback``, ``/teach``, ``/save``; ``0`` (default) disables.
+**GET poll limit (optional):** ``HAROMA_HTTP_GET_RATE_LIMIT_PER_MIN`` — max GETs per IP per minute on ``/chat/result``; ``0`` (default) disables.
+
+**Client IP behind a proxy (optional):** ``HAROMA_HTTP_USE_X_FORWARDED_FOR`` and
+``HAROMA_HTTP_TRUSTED_PROXIES`` — :mod:`mind.client_ip` uses ``X-Forwarded-For`` only when
+the direct peer is trusted (loopback or listed CIDRs).
 
 **Structured request logging (optional):** ``HAROMA_STRUCTURED_LOG=1`` emits one JSON line
 per HTTP response to stderr (``event=http_access``, ``request_id``, ``status``, ``duration_ms``,
@@ -110,12 +115,24 @@ import time
 import uuid
 from typing import Any, Dict, Optional, Tuple
 import atexit
+import threading
 import traceback as _tb
 
-from flask import Flask, g, request, send_from_directory, Response, stream_with_context
+from flask import (
+    Flask,
+    current_app,
+    g,
+    has_app_context,
+    request,
+    send_from_directory,
+    Response,
+    stream_with_context,
+)
 from werkzeug.serving import run_simple
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from sensors.domains import resolve_channel_to_domain
 
 from agents.boot_agent import BootAgent
 from agents.chat_latency import trace_requested
@@ -136,6 +153,7 @@ from mind.http_server_guards import (
 from mind.http_rate_limit import (
     RATE_LIMIT_WINDOW_SEC,
     check_rate_limit,
+    get_rate_limit_per_minute,
     rate_limit_per_minute,
 )
 from mind.lab_research import (
@@ -145,9 +163,11 @@ from mind.lab_research import (
     merge_lab_context_values,
 )
 from mind.robot_readiness import embodiment_readiness_summary
+from mind.client_ip import get_effective_client_ip
 from mind.structured_log import log_event, structured_log_enabled
 from mind.system_snapshot import build_http_status_payload
 from mind.user_identity import sanitize_user_id
+from mind.server_state import HaromaServerState, get_haroma_server_state
 from sensors.adapters import (
     SensorPoller,
     VisionAdapter,
@@ -163,6 +183,64 @@ from sensors.adapters import (
 )
 
 _WEB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web")
+
+app = Flask(__name__, static_folder=None)
+get_haroma_server_state(app)
+
+
+def _haroma() -> HaromaServerState:
+    """Haroma state for the active Flask app, or the module ``app`` outside any context.
+
+    Uses :data:`current_app` when an application context is active (requests, tests,
+    ``app.app_context()``); otherwise falls back to the process default ``app`` (e.g.
+    :func:`_init` during :func:`launch`).
+    """
+    if has_app_context():
+        return get_haroma_server_state(current_app)
+    return get_haroma_server_state(app)
+
+
+def _boot() -> Optional[BootAgent]:
+    """The booted multi-agent graph, or ``None`` before :func:`_init` completes."""
+    return _haroma().boot_agent
+
+
+def _http_server_not_ready_chat() -> Any:
+    """503 when :class:`InputAgent` is not available (user-facing chat routes)."""
+    return _json(
+        {
+            "error": "server not ready",
+            "response": "[server still booting — wait for console 'Chat API' line]",
+        },
+        503,
+    )
+
+
+def _http_not_booted() -> Any:
+    """503 when ``SharedResources`` is not attached (most API routes)."""
+    return _json({"error": "not booted"}, 503)
+
+
+def _require_boot_with_input() -> Tuple[Optional[BootAgent], Any]:
+    """``(boot_agent, None)`` or ``(None, error_response)`` for chat/poll routes.
+
+    Requires ``input_agent`` and ``shared`` — synchronous and async chat both use
+    ``shared`` (e.g. ``http_chat_begin`` / environment merge).
+    """
+    ba = _boot()
+    if ba is None or getattr(ba, "input_agent", None) is None:
+        return None, _http_server_not_ready_chat()
+    if ba.shared is None:
+        return None, _http_not_booted()
+    return ba, None
+
+
+def _require_boot_with_shared() -> Tuple[Optional[BootAgent], Any]:
+    """``(boot_agent, None)`` or ``(None, error_response)`` when ``shared`` is required."""
+    ba = _boot()
+    if ba is None or ba.shared is None:
+        return None, _http_not_booted()
+    return ba, None
 
 
 def _maybe_enable_fast_llm_for_gpu(shared) -> None:
@@ -200,111 +278,129 @@ def _async_chat_resolve_ready(rid: str) -> Tuple[str, Any]:
 
     Returns ``(code, value)`` where ``code`` is
     ``no_registry`` | ``bad_id`` | ``not_found`` | ``pending`` | ``complete``.
+
+    Uses atomic ``pop`` so concurrent polls cannot double-finalize the same slot.
     """
-    reg = _chat_async_registry
+    st = _haroma()
+    reg = st.chat_async_registry
     if reg is None:
         return ("no_registry", None)
     rid = (rid or "").strip()
     if not rid:
         return ("bad_id", None)
+    # Peek first (cheap, does not remove).
     ent = reg.get(rid)
     if ent is None:
         return ("not_found", None)
     slot = ent["slot"]
     if not slot["event"].is_set():
         return ("pending", rid)
-    result = normalize_http_chat_response(slot["result"])
+    # Atomically consume: only the winner proceeds with finalization.
+    ent = reg.pop(rid)
+    if ent is None:
+        return ("not_found", None)
+    result = normalize_http_chat_response(ent["slot"]["result"])
     if isinstance(result, dict):
         result = merge_lab_context_values(
             result,
             experiment_id=ent.get("experiment_id"),
             lab_run_id=ent.get("lab_run_id"),
         )
-    reg.pop(rid)
-    try:
-        boot_agent.shared.http_chat_end()
-    except Exception as _he:
-        print(f"[Server-v2] chat async finalize http_chat_end error: {_he}", flush=True)
-    try:
-        boot_agent.input_agent.log_response(result)
-    except Exception as _le:
-        print(f"[Server-v2] chat async finalize log_response error: {_le}", flush=True)
+    ba = st.boot_agent
+    if ba is not None:
+        try:
+            ba.shared.http_chat_end()
+        except Exception as _he:
+            print(f"[Server-v2] chat async finalize http_chat_end error: {_he}", flush=True)
+        try:
+            ba.input_agent.log_response(result)
+        except Exception as _le:
+            print(f"[Server-v2] chat async finalize log_response error: {_le}", flush=True)
     return ("complete", result)
 
 
 # =====================================================================
-# Globals
+# Boot / shutdown (state on Flask app — :func:`mind.server_state.get_haroma_server_state`)
 # =====================================================================
 
-boot_agent: BootAgent = None  # type: ignore
-sensor_poller: SensorPoller = None  # type: ignore
-_chat_async_registry: Optional[ChatAsyncRegistry] = None
+_INIT_LOCK = threading.Lock()
 
 
 def _init():
-    global boot_agent, sensor_poller, _chat_async_registry
+    """Construct agents once per process. Thread-safe; second call is a no-op."""
+    with _INIT_LOCK:
+        st = _haroma()
+        if st.boot_agent is not None:
+            print(
+                "[Elarion-v2] Boot skipped: already initialized (use one launch() per process).",
+                flush=True,
+            )
+            return
 
-    print("[Elarion-v2] Booting multi-agent architecture...", flush=True)
-    t0 = time.time()
+        print("[Elarion-v2] Booting multi-agent architecture...", flush=True)
+        t0 = time.time()
 
-    # 1. Boot agent initializes SharedResources and spawns all agents
-    boot_agent = BootAgent()
-    shared = boot_agent.boot()
-    _maybe_enable_fast_llm_for_gpu(shared)
-    _chat_async_registry = ChatAsyncRegistry(
-        shared,
-        ttl_sec=env_float("HAROMA_CHAT_ASYNC_TTL_SEC", 900.0),
-    )
+        # 1. Boot agent initializes SharedResources and spawns all agents
+        ba = BootAgent()
+        shared = ba.boot()
+        _maybe_enable_fast_llm_for_gpu(shared)
+        st.chat_async_registry = ChatAsyncRegistry(
+            shared,
+            ttl_sec=env_float("HAROMA_CHAT_ASYNC_TTL_SEC", 900.0),
+        )
 
-    # 2. Wire boot_agent reference into agents that need it
-    boot_agent.input_agent.set_boot_agent(boot_agent)
-    boot_agent.trueself_agent.set_boot_agent(boot_agent)
-    for persona in boot_agent.persona_agents:
-        persona.set_boot_agent(boot_agent)
+        # 2. Wire boot_agent reference into agents that need it
+        ba.input_agent.set_boot_agent(ba)
+        ba.trueself_agent.set_boot_agent(ba)
+        for persona in ba.persona_agents:
+            persona.set_boot_agent(ba)
 
-    # 3. Hardware sensor adapters (push into InputAgent's buffer)
-    rc = shared.resource_config
-    neural_perception = rc.sensor.get("neural_perception", True)
-    if neural_perception:
-        warmup_neural_models()
+        # 3. Hardware sensor adapters (push into InputAgent's buffer)
+        rc = shared.resource_config
+        neural_perception = rc.sensor.get("neural_perception", True)
+        if neural_perception:
+            warmup_neural_models()
 
-    sensor_poller = SensorPoller(
-        boot_agent.input_agent,
-        adapters=[
-            VisionAdapter(),
-            AudioAdapter(),
-            TouchAdapter(),
-            SmellAdapter(),
-            TasteAdapter(),
-            LidarAdapter(),
-            InfraredAdapter(),
-            ImuAdapter(),
-            GpsAdapter(),
-        ],
-    )
+        st.sensor_poller = SensorPoller(
+            ba.input_agent,
+            adapters=[
+                VisionAdapter(),
+                AudioAdapter(),
+                TouchAdapter(),
+                SmellAdapter(),
+                TasteAdapter(),
+                LidarAdapter(),
+                InfraredAdapter(),
+                ImuAdapter(),
+                GpsAdapter(),
+            ],
+        )
 
-    # 4. Start all agents
-    boot_agent.start_all()
-    sensor_poller.start()
+        st.boot_agent = ba
 
-    elapsed = time.time() - t0
-    _llm_name = getattr(shared.llm_backend, "model_name", None) or "none"
-    print(
-        f"[Elarion-v2] Boot complete in {elapsed:.1f}s | "
-        f"tier={rc.tier_name} | "
-        f"trueself=active | "
-        f"personas={len(boot_agent.persona_agents)} | "
-        f"llm={_llm_name}",
-        flush=True,
-    )
+        # 4. Start all agents
+        ba.start_all()
+        st.sensor_poller.start()
+
+        elapsed = time.time() - t0
+        _llm_name = getattr(shared.llm_backend, "model_name", None) or "none"
+        print(
+            f"[Elarion-v2] Boot complete in {elapsed:.1f}s | "
+            f"tier={rc.tier_name} | "
+            f"trueself=active | "
+            f"personas={len(ba.persona_agents)} | "
+            f"llm={_llm_name}",
+            flush=True,
+        )
 
 
 def _shutdown_save():
-    if boot_agent is None:
+    st = _haroma()
+    if st.boot_agent is None:
         return
-    if sensor_poller:
-        sensor_poller.stop()
-    boot_agent.save_and_shutdown()
+    if st.sensor_poller:
+        st.sensor_poller.stop()
+    st.boot_agent.save_and_shutdown()
 
 
 atexit.register(_shutdown_save)
@@ -337,16 +433,20 @@ def _json(data, status=200):
 def _json_lab(data, status=200):
     """JSON response with optional ``experiment_id`` / ``lab_run_id`` for lab clients."""
     if isinstance(data, dict):
-        sh = boot_agent.shared if boot_agent and boot_agent.shared else None
+        ba = _boot()
+        sh = ba.shared if ba and ba.shared else None
         data = merge_lab_context(data, sh, g)
     return _json(data, status)
 
 
-# =====================================================================
-# Flask
-# =====================================================================
+def _http_async_chat_not_initialized() -> Any:
+    """503 when async chat registry was never wired (should not happen after full boot)."""
+    return _json_lab({"error": "async chat not initialized"}, 503)
 
-app = Flask(__name__, static_folder=None)
+
+# =====================================================================
+# Flask routes (``app`` is created above with ``HaromaServerState``)
+# =====================================================================
 
 
 @app.before_request
@@ -366,7 +466,7 @@ def _haroma_optional_bearer_guard():
 
 @app.before_request
 def _haroma_rate_limit():
-    """Optional sliding-window POST limit (see :mod:`mind.http_rate_limit`)."""
+    """Optional sliding-window rate limit for POST and (if configured) GET poll routes."""
     out = check_rate_limit(request)
     if out is not None:
         body = dict(out[0])
@@ -406,7 +506,7 @@ def _haroma_after_request(response: Response):
             "status": response.status_code,
             "method": getattr(request, "method", "") or "",
             "path": getattr(request, "path", "") or "",
-            "remote": getattr(request, "remote_addr", None) or "",
+            "remote": get_effective_client_ip(request),
         }
         if dur_ms is not None:
             acc["duration_ms"] = dur_ms
@@ -418,7 +518,8 @@ def _haroma_after_request(response: Response):
 def handle_exception(e):
     _tb.print_exc()
     try:
-        cycle = boot_agent.shared.cycle_count if boot_agent and boot_agent.shared else 0
+        ba = _boot()
+        cycle = ba.shared.cycle_count if ba and ba.shared else 0
     except Exception:
         cycle = 0
     return _json(
@@ -439,20 +540,15 @@ def serve_index():
 
 @app.route("/chat", methods=["POST"])
 def chat():
-    if boot_agent is None or getattr(boot_agent, "input_agent", None) is None:
-        return _json(
-            {
-                "error": "server not ready",
-                "response": "[server still booting — wait for console 'Chat API' line]",
-            },
-            503,
-        )
+    ba, _boot_err = _require_boot_with_input()
+    if _boot_err is not None:
+        return _boot_err
     data = request.get_json(silent=True) or {}
     _exp_chat = getattr(g, "lab_experiment_id", None)
     _raw_env = data.get("agent_environment")
-    if _raw_env is not None and boot_agent.shared is not None:
+    if _raw_env is not None and ba.shared is not None:
         try:
-            boot_agent.shared.set_agent_environment(_raw_env)
+            ba.shared.set_agent_environment(_raw_env)
         except Exception as _ae:
             print(f"[Server-v2] agent_environment on /chat: {_ae}", flush=True)
     message = data.get("message", "").strip()
@@ -502,7 +598,7 @@ def chat():
     else:
         _async_req = _env_truthy_flag("HAROMA_CHAT_DEFAULT_ASYNC")
 
-    input_agent = boot_agent.input_agent
+    input_agent = ba.input_agent
     _chat_begun = False
     _async_handoff = False
     _prev = message[:80] + ("…" if len(message) > 80 else "")
@@ -513,7 +609,7 @@ def chat():
 
     try:
         _chat_t0 = time.time()
-        boot_agent.shared.http_chat_begin(depth=depth)
+        ba.shared.http_chat_begin(depth=depth)
         _chat_begun = True
         slot = input_agent.push_text(
             message,
@@ -535,13 +631,13 @@ def chat():
         )
 
         if _async_req:
-            reg = _chat_async_registry
+            reg = _haroma().chat_async_registry
             if reg is None:
-                return _json_lab({"error": "async chat not initialized"}, 503)
+                return _http_async_chat_not_initialized()
             rid = reg.register(
                 slot,
                 experiment_id=_exp_chat,
-                lab_run_id=getattr(boot_agent.shared, "lab_run_id", None),
+                lab_run_id=getattr(ba.shared, "lab_run_id", None),
             )
             _async_handoff = True
             print(f"[Server-v2] chat async handoff request_id={rid}", flush=True)
@@ -573,7 +669,7 @@ def chat():
         return _json_lab(
             {
                 "response": "[Elarion is still thinking... try again shortly]",
-                "cycle": boot_agent.shared.cycle_count,
+                "cycle": ba.shared.cycle_count,
                 "affect": {},
                 "strategy": "",
             }
@@ -584,7 +680,7 @@ def chat():
     finally:
         if _chat_begun and not _async_handoff:
             try:
-                boot_agent.shared.http_chat_end()
+                ba.shared.http_chat_end()
             except Exception as _he:
                 print(f"[Server-v2] http_chat_end error: {_he}", flush=True)
 
@@ -592,22 +688,17 @@ def chat():
 @app.route("/chat/result", methods=["GET", "DELETE"])
 def chat_result():
     """Poll or cancel the outcome of async ``POST /chat``."""
-    if boot_agent is None or getattr(boot_agent, "input_agent", None) is None:
-        return _json(
-            {
-                "error": "server not ready",
-                "response": "[server still booting — wait for console 'Chat API' line]",
-            },
-            503,
-        )
+    ba, _boot_err = _require_boot_with_input()
+    if _boot_err is not None:
+        return _boot_err
     rid = (request.args.get("id") or "").strip()
     if not rid:
         return _json({"error": "missing id query parameter"}, 400)
 
     if request.method == "DELETE":
-        reg = _chat_async_registry
+        reg = _haroma().chat_async_registry
         if reg is None:
-            return _json({"error": "async chat not initialized"}, 503)
+            return _http_async_chat_not_initialized()
         outcome = reg.cancel(rid)
         if outcome == "gone":
             return _json({"error": "unknown or expired request_id"}, 404)
@@ -622,11 +713,11 @@ def chat_result():
 
     code, val = _async_chat_resolve_ready(rid)
     if code == "no_registry":
-        return _json({"error": "async chat not initialized"}, 503)
+        return _http_async_chat_not_initialized()
     if code == "not_found":
         return _json({"error": "unknown or expired request_id"}, 404)
     if code == "pending":
-        reg = _chat_async_registry
+        reg = _haroma().chat_async_registry
         ent = reg.get(rid) if reg is not None else None
         pend: Dict[str, Any] = {"status": "pending", "request_id": rid}
         if ent:
@@ -654,7 +745,7 @@ def _chat_wait_sse_generator(rid: str, cap_sec: float, keepalive_sec: float):
         yield f"data: {json.dumps(_safe(val))}\n\n"
         return
 
-    reg = _chat_async_registry
+    reg = _haroma().chat_async_registry
     deadline = time.time() + cap_sec
     ka = max(1.0, float(keepalive_sec))
 
@@ -696,14 +787,9 @@ def _chat_wait_sse_generator(rid: str, cap_sec: float, keepalive_sec: float):
 @app.route("/chat/wait", methods=["GET"])
 def chat_wait():
     """Server-Sent Events stream until async chat completes or ``max_wait_sec``."""
-    if boot_agent is None or getattr(boot_agent, "input_agent", None) is None:
-        return _json(
-            {
-                "error": "server not ready",
-                "response": "[server still booting — wait for console 'Chat API' line]",
-            },
-            503,
-        )
+    _ba, _boot_err = _require_boot_with_input()
+    if _boot_err is not None:
+        return _boot_err
     rid = (request.args.get("id") or "").strip()
     if not rid:
         return _json({"error": "missing id query parameter"}, 400)
@@ -730,28 +816,33 @@ def chat_wait():
 
 @app.route("/sensor", methods=["POST"])
 def push_sensor():
-    if boot_agent is None or boot_agent.shared is None:
-        return _json({"error": "not booted"}, 503)
+    ba, _boot_err = _require_boot_with_shared()
+    if _boot_err is not None:
+        return _boot_err
     data = request.get_json(silent=True) or {}
     channel = data.get("channel", "unknown")
     payload = data.get("data", data)
     if str(channel).lower() in ("agent_environment", "environment"):
         pe = payload if isinstance(payload, dict) else data
-        result = boot_agent.shared.set_agent_environment(pe)
+        result = ba.shared.set_agent_environment(pe)
+        _sd = resolve_channel_to_domain(channel)
         return _json(
             {
                 "status": "stored",
                 "channel": channel,
+                "sense_domain": _sd.value,
                 "result": result,
-                "agent_environment": boot_agent.shared.agent_environment_status(),
+                "agent_environment": ba.shared.agent_environment_status(),
             }
         )
-    boot_agent.input_agent.push_sensor(channel, payload)
+    ba.input_agent.push_sensor(channel, payload)
+    _sd = resolve_channel_to_domain(channel)
     return _json(
         {
             "status": "buffered",
             "channel": channel,
-            "buffer": boot_agent.input_agent.buffer_stats(),
+            "sense_domain": _sd.value,
+            "buffer": ba.input_agent.buffer_stats(),
         }
     )
 
@@ -759,17 +850,18 @@ def push_sensor():
 @app.route("/agent/environment", methods=["POST"])
 def post_agent_environment():
     """Accept a structured environment snapshot (general-agent HTTP integrator)."""
-    if boot_agent is None or boot_agent.shared is None:
-        return _json({"error": "not booted"}, 503)
+    ba, _boot_err = _require_boot_with_shared()
+    if _boot_err is not None:
+        return _boot_err
     raw = request.get_json(silent=True)
     if raw is None or not isinstance(raw, dict):
         return _json({"error": "expected JSON object"}, 400)
-    result = boot_agent.shared.set_agent_environment(raw)
+    result = ba.shared.set_agent_environment(raw)
     return _json_lab(
         {
             "status": "ok" if result.get("ok") else "error",
             "result": result,
-            "agent_environment": boot_agent.shared.agent_environment_status(),
+            "agent_environment": ba.shared.agent_environment_status(),
         },
         status=200 if result.get("ok") else 400,
     )
@@ -782,17 +874,18 @@ def post_robot_bridge_feedback():
     Body matches :func:`mind.robot_execution_contract.normalize_feedback_payload`
     (``bridge_schema_version``, ``correlation_id``, ``results``).
     """
-    if boot_agent is None or boot_agent.shared is None:
-        return _json({"error": "not booted"}, 503)
+    ba, _boot_err = _require_boot_with_shared()
+    if _boot_err is not None:
+        return _boot_err
     raw = request.get_json(silent=True)
     if raw is None or not isinstance(raw, dict):
         return _json({"error": "expected JSON object"}, 400)
-    result = boot_agent.shared.merge_robot_bridge_feedback(raw)
+    result = ba.shared.merge_robot_bridge_feedback(raw)
     return _json_lab(
         {
             "status": "ok" if result.get("ok") else "error",
             "result": result,
-            "agent_environment": boot_agent.shared.agent_environment_status(),
+            "agent_environment": ba.shared.agent_environment_status(),
         },
         status=200 if result.get("ok") else 400,
     )
@@ -801,9 +894,10 @@ def post_robot_bridge_feedback():
 @app.route("/research/manifest", methods=["GET"])
 def research_manifest():
     """Return the boot-time run manifest (git, soul file hash, HAROMA_* env snapshot)."""
-    if boot_agent is None or boot_agent.shared is None:
-        return _json({"error": "not booted"}, 503)
-    m = getattr(boot_agent.shared, "run_manifest", None)
+    ba, _boot_err = _require_boot_with_shared()
+    if _boot_err is not None:
+        return _boot_err
+    m = getattr(ba.shared, "run_manifest", None)
     if not isinstance(m, dict) or not m:
         return _json({"error": "manifest_unavailable"}, 503)
     return _json(m)
@@ -812,9 +906,10 @@ def research_manifest():
 @app.route("/research/snapshot", methods=["GET"])
 def research_snapshot():
     """Bundle run manifest, recent lab HTTP events, ``agent_environment``, and readiness summary."""
-    if boot_agent is None or boot_agent.shared is None:
-        return _json({"error": "not booted"}, 503)
-    s = boot_agent.shared
+    ba, _boot_err = _require_boot_with_shared()
+    if _boot_err is not None:
+        return _boot_err
+    s = ba.shared
     lr = getattr(s, "lab_run_id", None)
     m = getattr(s, "run_manifest", None)
     return _json(
@@ -830,41 +925,45 @@ def research_snapshot():
 
 @app.route("/status", methods=["GET"])
 def status():
-    if boot_agent is None or boot_agent.shared is None:
-        return _json({"error": "not booted"}, 503)
+    ba, _boot_err = _require_boot_with_shared()
+    if _boot_err is not None:
+        return _boot_err
+    st = _haroma()
     return _json(
-        build_http_status_payload(boot_agent, sensor_poller, _chat_async_registry)
+        build_http_status_payload(ba, st.sensor_poller, st.chat_async_registry)
     )
 
 
 @app.route("/introspect", methods=["GET"])
 def introspect():
-    if boot_agent is None or boot_agent.shared is None:
-        return _json({"error": "not booted"}, 503)
-    s = boot_agent.shared
-    personas = {p.agent_id: p.stats() for p in boot_agent.persona_agents}
+    ba, _boot_err = _require_boot_with_shared()
+    if _boot_err is not None:
+        return _boot_err
+    s = ba.shared
+    personas = {p.agent_id: p.stats() for p in ba.persona_agents}
     return _json(
         {
             "shared": s.summary(),
-            "trueself": boot_agent.trueself_agent.stats(),
+            "trueself": ba.trueself_agent.stats(),
             "personas": personas,
-            "background": boot_agent.background_agent.stats(),
-            "input": boot_agent.input_agent.stats(),
-            "message_bus": boot_agent.bus.stats(),
+            "background": ba.background_agent.stats(),
+            "input": ba.input_agent.stats(),
+            "message_bus": ba.bus.stats(),
         }
     )
 
 
 @app.route("/resource", methods=["GET"])
 def resource_info():
-    if boot_agent is None or boot_agent.shared is None:
-        return _json({"error": "not booted"}, 503)
-    rc = boot_agent.shared.resource_config
+    ba, _boot_err = _require_boot_with_shared()
+    if _boot_err is not None:
+        return _boot_err
+    rc = ba.shared.resource_config
     return _json(
         {
             "resource_config": rc.summary(),
-            "llm_backend": boot_agent.shared.llm_backend.stats(),
-            "active_modules": boot_agent.shared.organ_registry.summary(),
+            "llm_backend": ba.shared.llm_backend.stats(),
+            "active_modules": ba.shared.organ_registry.summary(),
             "skipped_modules": rc.cycle.get("skip_modules", []),
         }
     )
@@ -872,10 +971,11 @@ def resource_info():
 
 @app.route("/save", methods=["POST"])
 def save_state():
-    if boot_agent is None or boot_agent.shared is None:
-        return _json({"error": "not booted"}, 503)
+    ba, _boot_err = _require_boot_with_shared()
+    if _boot_err is not None:
+        return _boot_err
     try:
-        result = boot_agent.shared.persistence.save(boot_agent.shared)
+        result = ba.shared.persistence.save(ba.shared)
         return _json({"status": "saved", "details": result})
     except Exception as e:
         _tb.print_exc()
@@ -885,10 +985,11 @@ def save_state():
 @app.route("/teach", methods=["POST"])
 def teach_meaning():
     """Register term→meaning glosses (JSON: {"term","meaning"} or {"items":[...]})."""
-    if boot_agent is None or boot_agent.shared is None:
-        return _json({"error": "not booted"}, 503)
+    ba, _boot_err = _require_boot_with_shared()
+    if _boot_err is not None:
+        return _boot_err
     data = request.get_json(silent=True) or {}
-    lex = boot_agent.shared.meaning_lexicon
+    lex = ba.shared.meaning_lexicon
     items = data.get("items")
     if isinstance(items, list):
         for it in items:
@@ -907,9 +1008,10 @@ def teach_meaning():
 @app.route("/laws", methods=["GET", "POST"])
 def laws_http():
     """Symbolic law snapshot (GET) or declare/revoke (POST). See :func:`mind.symbolic_law_api.handle_laws_request`."""
-    if boot_agent is None or boot_agent.shared is None:
-        return _json({"error": "not booted"}, 503)
-    return handle_laws_request(getattr(boot_agent.shared, "law", None), _json)
+    ba, _boot_err = _require_boot_with_shared()
+    if _boot_err is not None:
+        return _boot_err
+    return handle_laws_request(getattr(ba.shared, "law", None), _json)
 
 
 # =====================================================================
@@ -917,21 +1019,24 @@ def laws_http():
 # =====================================================================
 
 
-def _kill_port(port: int):
-    """Best-effort free *port* before bind. Windows: netstat/taskkill; other OS: no-op (add lsof/fuser later)."""
-    if os.name != "nt":
-        return
+def _kill_port_windows(port: int) -> None:
     import subprocess
 
+    # Best-effort: free the listen port before bind. No output on "nothing to kill".
+    # CMD pipelines can report returncode 0 even when findstr finds no lines; rely on stdout.
     try:
-        out = subprocess.check_output(
+        proc = subprocess.run(
             f'netstat -ano | findstr ":{port}" | findstr "LISTENING"',
             shell=True,
             text=True,
+            stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
         )
+        out = (proc.stdout or "").strip()
+        if not out:
+            return
         pids = set()
-        for line in out.strip().splitlines():
+        for line in out.splitlines():
             parts = line.split()
             if parts:
                 pids.add(parts[-1])
@@ -948,8 +1053,54 @@ def _kill_port(port: int):
                     f"[Elarion-v2] Killed stale process {pid} on port {port}",
                     flush=True,
                 )
-    except Exception as _e:
-        print(f"[Server-v2] kill_port error: {_e}", flush=True)
+    except Exception:
+        pass
+
+
+def _kill_port_posix(port: int) -> None:
+    """Best-effort: terminate other processes listening on *port* (requires ``lsof``)."""
+    import shutil
+    import signal
+    import subprocess
+
+    lsof = shutil.which("lsof")
+    if not lsof:
+        return
+    try:
+        out = subprocess.check_output(
+            [lsof, "-ti", f":{port}", "-sTCP:LISTEN"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+            timeout=8,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+        return
+    my_pid = os.getpid()
+    for line in out.strip().splitlines():
+        try:
+            pid = int(line.strip())
+        except ValueError:
+            continue
+        if pid == my_pid or pid <= 0:
+            continue
+        try:
+            os.kill(pid, signal.SIGTERM)
+            print(
+                f"[Elarion-v2] Sent SIGTERM to stale pid {pid} on port {port}",
+                flush=True,
+            )
+        except ProcessLookupError:
+            pass
+        except OSError as _e:
+            print(f"[Server-v2] kill_port (posix) error for pid {pid}: {_e}", flush=True)
+
+
+def _kill_port(port: int) -> None:
+    """Best-effort free *port* before bind (dev convenience; not a security boundary)."""
+    if os.name == "nt":
+        _kill_port_windows(port)
+    else:
+        _kill_port_posix(port)
 
 
 def launch():
@@ -1011,14 +1162,19 @@ def launch():
     else:
         print("[Elarion-v2]  HTTP bearer   : off (set HAROMA_HTTP_BEARER_TOKEN to require)", flush=True)
     _rlpm = rate_limit_per_minute()
-    if _rlpm > 0:
-        print(
-            f"[Elarion-v2]  HTTP rate limit: { _rlpm } POST/min per IP (chat, sensor, env, bridge, teach, save)",
-            flush=True,
-        )
+    _getlm = get_rate_limit_per_minute()
+    if _rlpm > 0 or _getlm > 0:
+        _parts = []
+        if _rlpm > 0:
+            _parts.append(
+                f"{_rlpm} POST/min (chat, sensor, env, bridge, teach, save)"
+            )
+        if _getlm > 0:
+            _parts.append(f"{_getlm} GET/min (chat/result poll)")
+        print(f"[Elarion-v2]  HTTP rate limit: {'; '.join(_parts)}", flush=True)
     else:
         print(
-            "[Elarion-v2]  HTTP rate limit: off (set HAROMA_HTTP_RATE_LIMIT_PER_MIN)",
+            "[Elarion-v2]  HTTP rate limit: off (HAROMA_HTTP_RATE_LIMIT_PER_MIN / HAROMA_HTTP_GET_RATE_LIMIT_PER_MIN)",
             flush=True,
         )
     if _env_truthy_flag("HAROMA_STRUCTURED_LOG"):

@@ -20,7 +20,7 @@ try:
     import torch.nn as nn
 
     _TORCH_AVAILABLE = True
-except ImportError:
+except (ImportError, OSError):
     _TORCH_AVAILABLE = False
 
 from engine.ComputeFabric import get_fabric as _get_fabric

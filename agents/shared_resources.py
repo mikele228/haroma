@@ -24,6 +24,8 @@ import contextlib
 import json
 import os
 import re
+import subprocess
+import sys
 import threading
 import time
 from typing import Any, Dict, Iterator, List, Optional
@@ -36,6 +38,56 @@ from agents.runtime_signals import RuntimeSignals
 from mind.cognitive_observability import CognitiveMetrics
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _llm_boot_preflight_ok() -> bool:
+    """Windows: run LLMBackend import+construct in a subprocess.
+
+    Native crashes (no Python traceback) during ``import engine.LLMBackend`` or
+    ``LLMBackend()`` would otherwise kill the whole server. If the child dies or
+    errors, skip the LLM stack and use :class:`CognitiveNull` so boot can finish.
+
+    Set ``HAROMA_LLM_BOOT_PREFLIGHT=0`` to skip (faster when stable). Preflight
+    defaults **on** only for ``os.name == "nt"``.
+    """
+    flag = str(os.environ.get("HAROMA_LLM_BOOT_PREFLIGHT", "") or "").strip().lower()
+    if flag in ("0", "false", "no", "off"):
+        return True
+    if os.name != "nt":
+        return True
+    root = _PROJECT_ROOT
+    script = (
+        "import os, sys\n"
+        f"os.chdir({root!r})\n"
+        f"sys.path.insert(0, {root!r})\n"
+        "from engine.LLMBackend import LLMBackend\n"
+        "LLMBackend(model_path=None, n_ctx=512, n_gpu_layers=0)\n"
+        "print('HAROMA_PREFLIGHT_OK', flush=True)\n"
+    )
+    try:
+        r = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            timeout=180,
+            cwd=root,
+        )
+    except subprocess.TimeoutExpired:
+        print(
+            "[SharedResources] LLM boot preflight: timeout — using CognitiveNull for LLM",
+            flush=True,
+        )
+        return False
+    ok = r.returncode == 0 and "HAROMA_PREFLIGHT_OK" in (r.stdout or "")
+    if not ok:
+        print(
+            "[SharedResources] LLM boot preflight failed "
+            f"(rc={r.returncode}) — using CognitiveNull for LLM. "
+            f"stdout={r.stdout!r} stderr={r.stderr!r}",
+            flush=True,
+        )
+    return ok
+
 
 # =====================================================================
 # Agent configuration loader
@@ -822,10 +874,13 @@ class SharedResources:
                     "1" if _mem_cfg["seed_context_enabled"] else "0",
                 )
             if "seed_max_chars" in _mem_cfg:
-                os.environ.setdefault(
-                    "HAROMA_SEED_CONTEXT_MAX_CHARS",
-                    str(int(_mem_cfg["seed_max_chars"])),
-                )
+                try:
+                    os.environ.setdefault(
+                        "HAROMA_SEED_CONTEXT_MAX_CHARS",
+                        str(int(_mem_cfg["seed_max_chars"])),
+                    )
+                except (TypeError, ValueError):
+                    pass
             if "touch_policy" in _mem_cfg:
                 os.environ.setdefault(
                     "HAROMA_MEMORY_TOUCH_POLICY",
@@ -845,22 +900,36 @@ class SharedResources:
         if _goals_cfg.get("multi_goal_per_cycle"):
             os.environ.setdefault("HAROMA_MULTI_GOAL_PER_CYCLE", "1")
         if "max_cycle_goals" in _goals_cfg:
-            os.environ.setdefault(
-                "HAROMA_MAX_CYCLE_GOALS",
-                str(int(_goals_cfg["max_cycle_goals"] or 3)),
-            )
+            try:
+                os.environ.setdefault(
+                    "HAROMA_MAX_CYCLE_GOALS",
+                    str(int(_goals_cfg["max_cycle_goals"] or 3)),
+                )
+            except (TypeError, ValueError):
+                pass
         if "max_actions_per_goal" in _goals_cfg:
-            os.environ.setdefault(
-                "HAROMA_MAX_ACTIONS_PER_GOAL",
-                str(int(_goals_cfg["max_actions_per_goal"] or 2)),
-            )
+            try:
+                os.environ.setdefault(
+                    "HAROMA_MAX_ACTIONS_PER_GOAL",
+                    str(int(_goals_cfg["max_actions_per_goal"] or 2)),
+                )
+            except (TypeError, ValueError):
+                pass
 
         from core.OrganizationalGoalBoard import OrganizationalGoalBoard
 
         _og = self.agent_config.get("organizational_goals", {})
+        try:
+            _cv = int(_og.get("consensus_votes", 2) or 2)
+        except (TypeError, ValueError):
+            _cv = 2
+        try:
+            _cttc = int(_og.get("ceo_ticks_to_complete", 3) or 3)
+        except (TypeError, ValueError):
+            _cttc = 3
         self.goal_board = OrganizationalGoalBoard(
-            consensus_votes=int(_og.get("consensus_votes", 2) or 2),
-            ceo_ticks_to_complete=int(_og.get("ceo_ticks_to_complete", 3) or 3),
+            consensus_votes=_cv,
+            ceo_ticks_to_complete=_cttc,
         )
 
         _train_cfg = _rc.training
@@ -960,6 +1029,8 @@ class SharedResources:
 
         # -- LLM: manager (mind) wraps LLMBackend engine ----------------
         def _make_llm():
+            if not _llm_boot_preflight_ok():
+                return CognitiveNull()
             from mind.manager import LLMManager
 
             _env_gpu = os.environ.get("HAROMA_N_GPU_LAYERS", "").strip()
@@ -1396,11 +1467,18 @@ class SharedResources:
                 self.organ_registry.register_module(name, ref)
 
     def summary(self) -> Dict[str, Any]:
+        mem = self.memory
+        mem_nodes = 0
+        if mem is not None and not is_cognitive_null(mem):
+            try:
+                mem_nodes = mem.count_nodes()
+            except Exception:
+                pass
         return {
             "boot_time": self.boot_time,
             "cycle_count": self.cycle_count,
             "resource_tier": getattr(self.resource_config, "tier_name", "?"),
-            "memory_nodes": self.memory.count_nodes() if self.memory else 0,
+            "memory_nodes": mem_nodes,
             "organs": (self.organ_registry.summary() if self.organ_registry else {}),
             "boot_results": self.boot_results,
             "autonomy_metrics": self.autonomy_metrics_snapshot(),

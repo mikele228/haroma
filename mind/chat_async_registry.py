@@ -9,13 +9,36 @@ Not durable across process restarts; single-node only. Thread-safe.
 
 from __future__ import annotations
 
+import os
+import sys
 import threading
 import time
 import uuid
 from typing import Any, Dict, Optional
 
+from mind.structured_log import log_event, structured_log_enabled
+
 _MAX_ENTRIES = 2048
 _DEFAULT_TTL_SEC = 900.0
+
+_LOG_HTTP_CHAT_END = ("1", "true", "yes", "on")
+
+
+def _log_http_chat_end_failure(exc: BaseException) -> None:
+    """Log when ``http_chat_end`` fails (silent by default; enable for debugging)."""
+    env_on = str(os.environ.get("HAROMA_LOG_HTTP_CHAT_END", "") or "").strip().lower() in _LOG_HTTP_CHAT_END
+    if structured_log_enabled():
+        log_event(
+            "http_chat_end_error",
+            error_type=type(exc).__name__,
+            error=str(exc)[:1200],
+        )
+    elif env_on:
+        print(
+            f"[ChatAsyncRegistry] http_chat_end failed: {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+            flush=True,
+        )
 
 
 class ChatAsyncRegistry:
@@ -95,8 +118,8 @@ class ChatAsyncRegistry:
         if ev is not None and not ev.is_set():
             try:
                 self._shared.http_chat_end()
-            except Exception:
-                pass
+            except Exception as e:
+                _log_http_chat_end_failure(e)
 
     def _evict_stale_unlocked(self) -> None:
         now = time.time()

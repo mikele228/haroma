@@ -98,7 +98,8 @@ def _get_gpu_info() -> Dict[str, Any]:
             result["mps"] = True
             result["available"] = True
             result["name"] = "Apple Silicon (MPS)"
-    except ImportError:
+    except (ImportError, OSError):
+        # OSError: e.g. WinError 1114 when torch's native DLLs fail to load
         pass
     return result
 

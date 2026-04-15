@@ -8,9 +8,9 @@ from types import SimpleNamespace
 
 import pytest
 
-_REPO = __import__("os").path.dirname(__import__("os").path.dirname(__file__))
-if _REPO not in sys.path:
-    sys.path.insert(0, _REPO)
+from tests._import_guard import prepare_test_imports
+
+prepare_test_imports(__file__)
 
 
 @pytest.fixture
@@ -80,18 +80,21 @@ def srv_mock():
         persona_agents=[],
         bus=SimpleNamespace(stats=lambda: {}),
     )
-    old_boot = srv.boot_agent
-    old_reg = srv._chat_async_registry
-    old_poller = srv.sensor_poller
-    srv.boot_agent = boot
-    srv.sensor_poller = SimpleNamespace(stats=lambda: {})
-    srv._chat_async_registry = ChatAsyncRegistry(shared, ttl_sec=60.0)
+    from mind.server_state import get_haroma_server_state
+
+    st = get_haroma_server_state(srv.app)
+    old_boot = st.boot_agent
+    old_reg = st.chat_async_registry
+    old_poller = st.sensor_poller
+    st.boot_agent = boot
+    st.sensor_poller = SimpleNamespace(stats=lambda: {})
+    st.chat_async_registry = ChatAsyncRegistry(shared, ttl_sec=60.0)
     try:
         yield srv, shared, inp
     finally:
-        srv.boot_agent = old_boot
-        srv._chat_async_registry = old_reg
-        srv.sensor_poller = old_poller
+        st.boot_agent = old_boot
+        st.chat_async_registry = old_reg
+        st.sensor_poller = old_poller
 
 
 def test_async_post_202_and_immediate_result(srv_mock):

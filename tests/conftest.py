@@ -3,26 +3,37 @@
 from __future__ import annotations
 
 import time
+from typing import TYPE_CHECKING
 
 import pytest
 
-from agents.boot_agent import BootAgent
+from tests._import_guard import prepare_test_imports
+
+# Before any agent/core imports: avoid sentence_transformers→torch during collection
+# (Windows hosts may crash loading torch DLLs even when SBERT is unused).
+prepare_test_imports(__file__)
+
+if TYPE_CHECKING:
+    from agents.boot_agent import BootAgent
 
 
 @pytest.fixture(autouse=True)
 def _isolate_lab_and_rate_limit_state():
     """Reset global lab event ring and HTTP rate-limit buckets between tests."""
+    from mind.client_ip import clear_trusted_proxy_cache_for_tests
     from mind.http_rate_limit import clear_rate_limit_state_for_tests
     from mind.lab_research import clear_lab_events_for_tests
 
     clear_lab_events_for_tests()
     clear_rate_limit_state_for_tests()
+    clear_trusted_proxy_cache_for_tests()
     yield
 
 
 @pytest.fixture(scope="session")
-def boot() -> BootAgent:
+def boot() -> "BootAgent":
     """Boot multi-agent stack once, start all agents, tear down after the session."""
+    from agents.boot_agent import BootAgent
     from tests.test_multi_agent_chat import _patch_delegation_logging
 
     b = BootAgent()

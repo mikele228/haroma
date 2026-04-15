@@ -408,6 +408,20 @@ class CognitivePersistence:
                 saved["autonomy_state"] = f"error: {e}"
 
         self._last_save_cycle = getattr(controller, "cycle_count", 0)
+        err_keys = [
+            k
+            for k, v in saved.items()
+            if isinstance(v, str) and v.startswith("error:")
+        ]
+        if err_keys:
+            print(
+                f"[Persistence] save degraded: {len(err_keys)} component(s) failed: {', '.join(err_keys)}",
+                flush=True,
+            )
+            saved["persist_status"] = "degraded"
+            saved["persist_error_keys"] = err_keys
+        else:
+            saved["persist_status"] = "ok"
         return saved
 
     def load_personality_profiles(self, profiles) -> Dict[str, str]:
@@ -565,7 +579,8 @@ class CognitivePersistence:
             loaded["emotion_model"] = _timed("emotion_model", _load_emotion)
 
         def _load_world_model():
-            if not hasattr(controller, "curiosity") or controller.curiosity is None:
+            from core.cognitive_null import is_cognitive_null as _icn
+            if not hasattr(controller, "curiosity") or controller.curiosity is None or _icn(controller.curiosity):
                 return "skipped (no curiosity)"
             world_data = self._read_json("world_model.json")
             if world_data:
@@ -581,7 +596,8 @@ class CognitivePersistence:
         loaded["world_model"] = _timed("world_model", _load_world_model)
 
         def _load_curiosity():
-            if not hasattr(controller, "curiosity") or controller.curiosity is None:
+            from core.cognitive_null import is_cognitive_null as _icn
+            if not hasattr(controller, "curiosity") or controller.curiosity is None or _icn(controller.curiosity):
                 return "skipped (no curiosity)"
             novelty_data = self._read_json("curiosity.json")
             if novelty_data and isinstance(novelty_data, dict):
@@ -629,6 +645,7 @@ class CognitivePersistence:
 
         def _load_json_into(label, json_file, target, attr_or_fn, *, check_type=dict, defer=False):
             """Generic: read JSON -> call from_dict or set attr."""
+            from core.cognitive_null import is_cognitive_null
 
             def _do():
                 data = _cached_read_json(json_file)
@@ -642,7 +659,7 @@ class CognitivePersistence:
                     target.from_dict(data)
                 return "ok"
 
-            if target is None:
+            if target is None or is_cognitive_null(target):
                 return
             if defer and (time.time() - t0) > 5.0:
                 _deferred.append((label, _do))

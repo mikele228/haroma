@@ -2,8 +2,16 @@
 
 import os
 
+import pytest
+
+from tests._import_guard import skip_unless_torch_imports
+
+skip_unless_torch_imports()
+
 from engine.LLMBackend import _find_gguf
 from engine.ResourceAdaptiveConfig import _pick_auto_gguf
+
+pytestmark = pytest.mark.torch
 
 
 def test_find_gguf_prefers_smallest(tmp_path):

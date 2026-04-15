@@ -39,7 +39,7 @@ try:
     import torch.nn.functional as F
 
     _TORCH = True
-except ImportError:
+except (ImportError, OSError):
     _TORCH = False
 
 from engine.ComputeFabric import get_fabric as _get_fabric

@@ -101,6 +101,9 @@ _CONVERSATIONAL_BORING_FRAGMENTS = (
     "I attend to the emotional tone",
     "shifting to make, progress",
     "Reconnect thread:",
+    # ReasoningEngine KG gap-filling — not user-facing chat copy
+    "gather information about",
+    "insufficient knowledge",
 )
 
 
@@ -887,8 +890,15 @@ class ActionGenerator:
         plan_steps = rr.get("plan_steps", [])
         if plan_steps:
             step = plan_steps[0]
-            elements.append(str(step.get("step", "proceed")))
-            pre = step.get("preconditions", [])
+            step_text = str(step.get("step", "proceed"))
+            pre = step.get("preconditions", []) or []
+            if ctx.get("utterance_style") == "conversational":
+                st_low = step_text.lower()
+                if "gather information about" in st_low and any(
+                    str(p or "").strip().lower() == "insufficient knowledge" for p in pre
+                ):
+                    return ActionCandidate("advance_goal", [])
+            elements.append(step_text)
             if pre:
                 elements.append(str(pre[0]))
 

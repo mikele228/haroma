@@ -4,9 +4,15 @@ import json
 
 import pytest
 
+from tests._import_guard import skip_unless_torch_imports
+
+skip_unless_torch_imports()
+
 from engine.LLMBackend import LLMBackend
 from mind.cognitive_contracts import parse_response
 from engine.ProgrammedLLM import ProgrammedLLMResponder
+
+pytestmark = pytest.mark.torch
 
 
 @pytest.fixture

@@ -10,14 +10,14 @@ try:
     import torch.nn as nn
 
     _TORCH = True
-except ImportError:
+except (ImportError, OSError):
     _TORCH = False
 
 try:
     from transformers import AutoTokenizer, AutoModel
 
     _TRANSFORMERS = True
-except ImportError:
+except (ImportError, OSError):
     _TRANSFORMERS = False
 
 

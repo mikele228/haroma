@@ -26,7 +26,7 @@ try:
     import torch.nn as nn
 
     _TORCH = True
-except ImportError:
+except (ImportError, OSError):
     _TORCH = False
 
 from engine.ComputeFabric import get_fabric as _get_fabric

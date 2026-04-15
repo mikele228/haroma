@@ -149,7 +149,8 @@ try:
     from sentence_transformers import SentenceTransformer as _SentenceTransformer
 
     _HAS_SBERT = True
-except ImportError:
+except (ImportError, OSError):
+    # OSError: e.g. WinError 1114 when torch/sentence_transformers native DLLs fail to load
     _HAS_SBERT = False
 
 try:

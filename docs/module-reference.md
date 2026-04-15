@@ -85,6 +85,8 @@ Complete inventory of every module in HaromaX6, organized by directory.
 |------|----------------|-------------|
 | `control.py` | `ElarionController` | Central orchestrator with 40+ step `run_cycle()`. [Details](cognitive-cycle.md) |
 | `deploy_config.py` | `load_dotenv`, `http_listen_host`, `http_listen_port` | Project-root `.env`, bind host/port (`HAROMA_BIND_HOST`, `HAROMA_HTTP_PORT`). [Getting Started](getting-started.md) |
+| `server_state.py` | `HaromaServerState`, `HAROMA_FLASK_EXTENSION_KEY`, `get_haroma_server_state` | Boot agent, sensor poller, and async chat registry attach via `get_haroma_server_state(app)` (key `HAROMA_FLASK_EXTENSION_KEY`, default `"haroma"`) — not module-level globals. |
+| `client_ip.py` | `get_effective_client_ip`, `direct_peer_trusted_for_xff` | Rate limits and structured logs use the effective client; optional `X-Forwarded-For` when the direct peer is trusted (`HAROMA_HTTP_USE_X_FORWARDED_FOR`, `HAROMA_HTTP_TRUSTED_PROXIES`). [API](api-reference.md) |
 | `elarion_server_v2.py` | Flask app, `BootAgent`, sensor poller | HTTP server, multi-agent boot, research routes, optional bearer/rate-limit/structured logs, `/laws`. [Details](api-reference.md) |
 | `manager.py` | `IdentityManager`, `GoalManager`, `EmotionManagerSimple`, `DreamManager`, `PerceptionManager`, `DriftManager`, `CollapseManager`, `ForecastManager`, `LoopLoggerManager`, ... | Lightweight manager wrappers (14 managers). |
 

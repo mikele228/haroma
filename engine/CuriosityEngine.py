@@ -22,7 +22,7 @@ try:
     import numpy as np
 
     _TORCH = True
-except ImportError:
+except (ImportError, OSError):
     _TORCH = False
 
 

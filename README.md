@@ -124,6 +124,7 @@ Comprehensive documentation lives in [`docs/`](docs/index.md):
 | [Minded architecture](docs/minded-architecture-metaphor.md) | Atomos, Brain CPU / Memory / Law / Fuel, simulated sentience |
 | [Design Philosophy](docs/design-philosophy.md) | Foundational principles |
 | [Architecture audit](docs/architecture-audit.md) | Concurrency, trust boundaries, gaps |
+| [Production hardening](docs/production-hardening.md) | Bind/TLS, auth paths, rate limits, ops checklist |
 | [Lab research](docs/lab-research.md) | Run manifest, `X-Experiment-Id`, `/research/manifest`, `/research/snapshot` |
 | [Gymnasium bridge](docs/gymnasium-bridge.md) | Bandit JSONL, `HAROMA_RLLIB_SCORE_FN`, offline helpers, HTTP `Env` |
 | [Simulation backends](docs/simulation-backends.md) | Pluggable `SimulationBackend` (`null`, `http_json`, `module:Class`) |
@@ -140,7 +141,7 @@ HaromaX6/
 ├── mind/                       Orchestration (controller, server, managers)
 ├── core/                       Stateful modules (memory, knowledge, drives, soul, ...)
 ├── engine/                     Processing engines (neural, reasoning, emotion, ...)
-├── sensors/                    Hardware sensor adapters
+├── sensors/                    Adapters + sense-domain taxonomy (`domains.py`)
 ├── soul/                       Immutable identity files
 ├── boot/                       Sensory intake clients
 ├── environment/                World grounding
