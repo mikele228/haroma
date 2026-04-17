@@ -11,7 +11,7 @@ until the reply is ready. ``--sse`` (implies ``--async``) completes via
 ``GET /chat/wait`` (SSE stream) instead of polling. Reports accept time (202)
 and end-to-end time.
 
-Uses ``depth`` (``fast`` | ``normal``), not ``mode``, to match ``elarion_server_v2``.
+Uses ``depth`` (``normal``), not ``mode``, to match ``elarion_server_v2``.
 """
 
 from __future__ import annotations
@@ -109,9 +109,9 @@ def main() -> int:
     ap.add_argument("--base", default="http://127.0.0.1:8193", help="Server root URL")
     ap.add_argument(
         "--depth",
-        choices=("fast", "normal"),
-        default="fast",
-        help="POST depth (default fast)",
+        choices=("normal",),
+        default="normal",
+        help="POST depth",
     )
     ap.add_argument("--message", default="ping", help="User message body")
     ap.add_argument("--repeat", type=int, default=1, help="Number of /chat calls after warmup")
@@ -121,7 +121,7 @@ def main() -> int:
         "--timeout",
         type=float,
         default=240.0,
-        help="Per-request read timeout for /chat (240s fits depth=fast defaults; raise for normal)",
+        help="Per-request read timeout for /chat",
     )
     ap.add_argument(
         "--async",

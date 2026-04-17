@@ -32,7 +32,8 @@ from typing import Any, Dict, Iterator, List, Optional
 
 from core.MeaningLexicon import MeaningLexicon
 from core.self_model_train_batch import SelfModelTrainBatch
-from core.concurrency import ConcurrencyCoordinator
+from core.concurrency import ConcurrencyCoordinator, NeuralRWLock
+from mind.lock_budget import report_shared_lock_section
 from core.cognitive_null import CognitiveNull, is_cognitive_null
 from agents.runtime_signals import RuntimeSignals
 from mind.cognitive_observability import CognitiveMetrics
@@ -779,25 +780,90 @@ class SharedResources:
             self.cycle_count += 1
             return self.cycle_count
 
+    def _neural_rw_lock(self) -> NeuralRWLock:
+        rw = getattr(self, "_neural_rw", None)
+        if rw is None:
+            rw = NeuralRWLock()
+            self._neural_rw = rw
+        return rw
+
     @contextlib.contextmanager
     def neural_sync(self) -> Iterator[None]:
-        """Exclusive section for shared neural modules (train vs forward).
+        """Shared **inference** lock (read side): encoder forward + persona forwards.
 
-        BackgroundAgent runs ``train_step`` via :mod:`core.training_surface` on encoder,
-        composer, appraisal, imagination, etc.; PersonaAgent runs the full cognitive cycle that
-        forwards through the same parameters. Hold this lock around training
-        batches and around inference so optimizer updates never overlap reads.
+        Multiple threads may hold this concurrently. Background training uses
+        :meth:`neural_train_sync` (write side), which waits for all readers.
+
+        Hold time is checked against ``HAROMA_SHARED_LOCK_BUDGET_SEC`` (see
+        :mod:`mind.lock_budget`); keep critical sections short.
         """
-        lock = getattr(self, "_neural_lock", None)
-        if lock is None:
-            # Older / pickled shells without ``__init__`` run — attach lazily.
-            lock = threading.RLock()
-            self._neural_lock = lock
-        lock.acquire()
+        rw = self._neural_rw_lock()
+        t_wait0 = time.perf_counter()
+        rw.acquire_read()
+        t_hold0 = time.perf_counter()
         try:
             yield
         finally:
-            lock.release()
+            hold_sec = time.perf_counter() - t_hold0
+            rw.release_read()
+            wait_sec = t_hold0 - t_wait0
+            report_shared_lock_section(
+                "neural_read",
+                wait_sec=wait_sec,
+                hold_sec=hold_sec,
+                cognitive_metrics=getattr(self, "cognitive_metrics", None),
+            )
+
+    @contextlib.contextmanager
+    def neural_train_sync(self) -> Iterator[None]:
+        """Exclusive **training** lock (write side). Waits for inference readers."""
+        rw = self._neural_rw_lock()
+        t_wait0 = time.perf_counter()
+        rw.acquire_write()
+        t_hold0 = time.perf_counter()
+        try:
+            yield
+        finally:
+            hold_sec = time.perf_counter() - t_hold0
+            rw.release_write()
+            report_shared_lock_section(
+                "neural_train_write",
+                wait_sec=t_hold0 - t_wait0,
+                hold_sec=hold_sec,
+                cognitive_metrics=getattr(self, "cognitive_metrics", None),
+            )
+
+    @contextlib.contextmanager
+    def persona_neural_section(self) -> Iterator[None]:
+        """Persona cognitive segments: serial vs other personas, read lock for weights.
+
+        InputAgent uses only :meth:`neural_sync` so chat encoding can overlap one
+        persona's neural work without blocking on the other persona's cycle.
+
+        Inlines the neural read lock (does not nest :meth:`neural_sync`) so hold
+        time is reported once as ``persona_neural_section``.
+        """
+        lock = getattr(self, "_persona_cycle_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._persona_cycle_lock = lock
+        rw = self._neural_rw_lock()
+        t_wait0 = time.perf_counter()
+        with lock:
+            rw.acquire_read()
+            t_after_read = time.perf_counter()
+            try:
+                yield
+            finally:
+                hold_sec = time.perf_counter() - t_after_read
+                rw.release_read()
+                wait_sec = t_after_read - t_wait0
+                report_shared_lock_section(
+                    "persona_neural_section",
+                    wait_sec=wait_sec,
+                    hold_sec=hold_sec,
+                    cognitive_metrics=getattr(self, "cognitive_metrics", None),
+                )
 
     _BOOT_DEADLINE = 30.0
     _MODULE_TIMEOUT = 5.0
@@ -1066,6 +1132,24 @@ class SharedResources:
                             f"[SharedResources] LLM warmup error: {_wexc}",
                             flush=True,
                         )
+                _pref = getattr(self.llm_backend, "prefetch_lazy_local_if_pending", None)
+                if callable(_pref):
+                    import threading
+
+                    def _bg_prefetch() -> None:
+                        try:
+                            _pref()
+                        except Exception as _pex:
+                            print(
+                                f"[SharedResources] LLM lazy prefetch error: {_pex}",
+                                flush=True,
+                            )
+
+                    threading.Thread(
+                        target=_bg_prefetch,
+                        name="HaromaLLMLazyPrefetch",
+                        daemon=True,
+                    ).start()
 
         # -- composition -----------------------------------------------
         def _make_composer():

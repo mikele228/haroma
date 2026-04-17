@@ -14,6 +14,7 @@ from mind.bg_training_env import (
     bg_training_defer_cap_effective_seconds,
     bg_training_defer_cap_sec,
     defer_training_on_http_chat,
+    defer_training_on_input_pipeline,
 )
 
 
@@ -25,6 +26,19 @@ def test_defer_default_true(monkeypatch: pytest.MonkeyPatch):
 def test_defer_explicit_off(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("HAROMA_BG_DEFER_TRAINING_ON_HTTP_CHAT", "0")
     assert defer_training_on_http_chat() is False
+
+
+def test_defer_input_pipeline_env_overrides_legacy(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("HAROMA_BG_DEFER_TRAINING_ON_HTTP_CHAT", "1")
+    monkeypatch.setenv("HAROMA_BG_DEFER_TRAINING_ON_INPUT_PIPELINE", "0")
+    assert defer_training_on_input_pipeline() is False
+    assert defer_training_on_http_chat() is False
+
+
+def test_defer_legacy_when_new_unset(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("HAROMA_BG_DEFER_TRAINING_ON_INPUT_PIPELINE", raising=False)
+    monkeypatch.setenv("HAROMA_BG_DEFER_TRAINING_ON_HTTP_CHAT", "0")
+    assert defer_training_on_input_pipeline() is False
 
 
 def test_cap_unset_is_none(monkeypatch: pytest.MonkeyPatch):

@@ -145,9 +145,9 @@ def main() -> int:
     )
     ap.add_argument(
         "--depth",
-        default="fast",
-        choices=("fast", "normal"),
-        help="POST /chat depth (matches web UI default)",
+        default="normal",
+        choices=("normal",),
+        help="POST /chat depth",
     )
     ap.add_argument(
         "--chat-only",

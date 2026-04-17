@@ -53,7 +53,7 @@ def test_cadence_defers_when_chat_inflight(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("HAROMA_BG_DEFER_TRAINING_ON_HTTP_CHAT", "1")
     monkeypatch.delenv("HAROMA_BG_DEFER_TRAINING_CAP_SEC", raising=False)
     s = _Sh()
-    s.http_chat_begin("fast")
+    s.http_chat_begin("normal")
     c = BackgroundCadence(s)
     assert c.should_run_training_now() is False
     s.http_chat_end()
@@ -65,7 +65,7 @@ def test_cadence_cap_bypasses_defer(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("HAROMA_BG_DEFER_TRAINING_CAP_SEC", "0.05")
     s = _Sh()
     s.signals.last_background_training_at = time.time() - 1.0
-    s.http_chat_begin("fast")
+    s.http_chat_begin("normal")
     c = BackgroundCadence(s)
     assert c.should_run_training_now() is True
 

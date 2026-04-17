@@ -48,7 +48,7 @@ def test_haroma_bandit_env_reset_step(gymnasium_available, monkeypatch):
     assert obs2.shape == obs.shape
 
 
-def test_haroma_bandit_env_depth_fast_maps_to_normal(gymnasium_available):
+def test_haroma_bandit_env_depth_legacy_ignored(gymnasium_available):
     from mind.training.haroma_gym_env import HaromaBanditChatEnv
 
     env = HaromaBanditChatEnv(

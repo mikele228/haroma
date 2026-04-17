@@ -14,12 +14,15 @@ import sys
 import threading
 import time
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from mind.structured_log import log_event, structured_log_enabled
 
 _MAX_ENTRIES = 2048
 _DEFAULT_TTL_SEC = 900.0
+# After a reply is delivered, keep it briefly so duplicate GETs (SSE + poll race, retries)
+# still return 200 instead of 404.
+_DEFAULT_COMPLETED_SEC = 180.0
 
 _LOG_HTTP_CHAT_END = ("1", "true", "yes", "on")
 
@@ -49,6 +52,8 @@ class ChatAsyncRegistry:
         self._ttl_sec = max(1.0, float(ttl_sec))
         self._lock = threading.Lock()
         self._pending: Dict[str, Dict[str, Any]] = {}
+        # request_id -> (expiry_epoch, payload) for idempotent repeat GET /chat/result
+        self._completed: Dict[str, Tuple[float, Any]] = {}
 
     def register(
         self,
@@ -91,6 +96,48 @@ class ChatAsyncRegistry:
         with self._lock:
             self._evict_stale_unlocked()
             return len(self._pending)
+
+    def remember_completed(self, request_id: str, payload: Any, *, ttl_sec: Optional[float] = None) -> None:
+        """Store a finished chat JSON for repeat polls (same *request_id*, short TTL)."""
+        rid = (request_id or "").strip()
+        if not rid:
+            return
+        try:
+            ttl = float(ttl_sec) if ttl_sec is not None else float(
+                os.environ.get("HAROMA_CHAT_ASYNC_COMPLETED_CACHE_SEC", "") or _DEFAULT_COMPLETED_SEC
+            )
+        except (TypeError, ValueError):
+            ttl = _DEFAULT_COMPLETED_SEC
+        ttl = max(5.0, min(600.0, ttl))
+        with self._lock:
+            self._sweep_completed_unlocked()
+            self._completed[rid] = (time.time() + ttl, payload)
+            # cap size
+            while len(self._completed) > min(_MAX_ENTRIES, 4096):
+                oldest = min(self._completed.items(), key=lambda kv: kv[1][0])[0]
+                self._completed.pop(oldest, None)
+
+    def get_completed(self, request_id: str) -> Optional[Any]:
+        """Return cached payload if *request_id* was recently completed, else ``None``."""
+        rid = (request_id or "").strip()
+        if not rid:
+            return None
+        with self._lock:
+            self._sweep_completed_unlocked()
+            ent = self._completed.get(rid)
+            if not ent:
+                return None
+            exp, val = ent
+            if time.time() > exp:
+                self._completed.pop(rid, None)
+                return None
+            return val
+
+    def _sweep_completed_unlocked(self) -> None:
+        now = time.time()
+        stale = [k for k, (exp, _) in self._completed.items() if now > exp]
+        for k in stale:
+            self._completed.pop(k, None)
 
     def cancel(self, request_id: str) -> str:
         """Drop a pending request. Returns ``gone`` | ``not_pending`` | ``ok``."""

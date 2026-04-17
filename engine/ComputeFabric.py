@@ -79,6 +79,15 @@ class ComputeFabric:
         if not _TORCH:
             return data
         dt = dtype if dtype is not None else torch.float32
+        if isinstance(data, (list, tuple)) and len(data) > 0:
+            el0 = data[0]
+            if hasattr(el0, "__array__") and not isinstance(el0, (int, float, bool)):
+                try:
+                    import numpy as np
+
+                    data = np.stack(data, axis=0)
+                except (TypeError, ValueError):
+                    pass
         t = torch.tensor(data, dtype=dt)
         if self._device is not None:
             t = t.to(self._device)

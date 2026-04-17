@@ -30,6 +30,17 @@ from agents import chat_latency
 from agents.persona_agent import PersonaAgent
 from agents.message_bus import Message, MessageBus
 from mind.cognitive_observability import append_cognitive_trace_to_payload, log_cognitive_trace
+from mind.chat_priority import chat_input_priority_defer_non_user, input_pipeline_busy
+from mind.chat_pipeline_log import (
+    chat_pipeline_log_enabled,
+    log_chat_pipeline,
+    trace_id_from_message,
+    trace_id_from_slot,
+)
+from mind.trueself_input_priority import (
+    is_sensor_pulse_no_chat_text,
+    partition_trueself_input_for_tick,
+)
 
 if TYPE_CHECKING:
     from agents.shared_resources import SharedResources
@@ -95,12 +106,26 @@ class TrueSelfAgent(PersonaAgent):
         self._exec_lock.acquire()
         self._llm_io_in_progress = False
 
-    def _acquire_exec_when_llm_idle(self) -> None:
+    def _acquire_exec_when_llm_idle(self, *, wait_trace_id: Optional[str] = None) -> None:
         """Block until packed LLM I/O is done, then take ``_exec_lock``."""
+        t_spin = time.perf_counter()
+        spin_i = 0
         while True:
             self._exec_lock.acquire()
             if self._llm_io_in_progress:
                 self._exec_lock.release()
+                if (
+                    wait_trace_id
+                    and chat_pipeline_log_enabled()
+                    and spin_i > 0
+                    and spin_i % 50 == 0
+                ):
+                    log_chat_pipeline(
+                        "trueself.waiting_packed_llm_io",
+                        trace_id=wait_trace_id,
+                        detail=f"blocked_s={time.perf_counter() - t_spin:.1f}",
+                    )
+                spin_i += 1
                 time.sleep(0.02)
                 continue
             return
@@ -123,21 +148,66 @@ class TrueSelfAgent(PersonaAgent):
             elif msg.channel in ("reconcile_update", "dream_update"):
                 other_msgs.append(msg)
 
-        if self._llm_io_in_progress:
-            for msg in input_msgs + relay_msgs + other_msgs:
+        if chat_input_priority_defer_non_user(self.shared, getattr(self, "_boot_agent", None)):
+            for msg in relay_msgs + other_msgs:
                 self.bus.send_direct(self.agent_id, msg)
+            relay_msgs = []
+            other_msgs = []
+
+        deferred_sensor: List[Message] = []
+        if len(input_msgs) > 1:
+            _order_before = [trace_id_from_message(m) for m in input_msgs]
+            input_msgs, deferred_sensor = partition_trueself_input_for_tick(input_msgs)
+            _order_full = [trace_id_from_message(m) for m in input_msgs + deferred_sensor]
+            if chat_pipeline_log_enabled() and _order_before != _order_full:
+                log_chat_pipeline(
+                    "trueself.input_reordered_http_first",
+                    trace_id=_order_full[0] if _order_full else None,
+                    detail=f"n={len(_order_full)} before={_order_before} after={_order_full}",
+                )
+            if deferred_sensor and chat_pipeline_log_enabled():
+                log_chat_pipeline(
+                    "trueself.input_defer_sensor_backlog",
+                    trace_id=trace_id_from_message(input_msgs[0]) if input_msgs else None,
+                    detail=f"process_now={len(input_msgs)} requeued={len(deferred_sensor)}",
+                )
+            if deferred_sensor:
+                for m in deferred_sensor:
+                    self.bus.send_direct(self.agent_id, m)
+
+        if chat_pipeline_log_enabled() and input_msgs:
+            _its = [trace_id_from_message(m) for m in input_msgs]
+            log_chat_pipeline(
+                "trueself.tick_input_batch",
+                trace_id=_its[0] if _its else None,
+                detail=f"n={len(input_msgs)} traces={_its}",
+            )
+        if self._llm_io_in_progress:
+            # Re-queue only non-user mail. Never bounce ``input`` (HTTP /chat) to the
+            # back of the mailbox — that starved user turns behind a long generate_chat.
+            # Handling input here blocks in ``_handle_input`` → ``_acquire_exec_when_llm_idle``
+            # until packed LLM finishes, then runs the user turn next.
+            for msg in relay_msgs + other_msgs:
+                log_chat_pipeline(
+                    "trueself.tick_requeue_during_llm_io",
+                    trace_id=trace_id_from_message(msg),
+                    detail=msg.channel,
+                )
+                self.bus.send_direct(self.agent_id, msg)
+            for msg in input_msgs:
+                self._handle_input(msg)
         else:
             for msg in input_msgs:
                 self._handle_input(msg)
 
             for msg in relay_msgs:
-                self._acquire_exec_when_llm_idle()
+                self._acquire_exec_when_llm_idle(wait_trace_id=None)
                 try:
                     self._handle_relay_message(msg)
                 finally:
                     self._exec_lock.release()
             for msg in other_msgs:
-                self._acquire_exec_when_llm_idle()
+                self._acquire_exec_when_llm_idle(wait_trace_id=None)
                 try:
                     self._handle_reconcile_update(msg)
                 finally:
@@ -150,123 +220,42 @@ class TrueSelfAgent(PersonaAgent):
 
     # -- input handling (sole receiver) ------------------------------------
 
-    _FAST_PATH_LLM_WAIT_MAX = 2.0
-    _FAST_PATH_LOCK_PATIENCE = 20.0
-
-    def handle_http_fast(self, msg: Message):
-        """`depth=fast` from HTTP: run on the caller thread with _exec_lock.
-
-        Retries lock acquisition for up to ``_FAST_PATH_LOCK_PATIENCE``
-        seconds.  If another cycle's LLM I/O is in progress and doesn't
-        finish within ``_FAST_PATH_LLM_WAIT_MAX``, falls back to mailbox.
-        """
-        _t0 = time.time()
-        _llm_wait_start = None
-        while True:
-            elapsed = time.time() - _t0
-            if elapsed > self._FAST_PATH_LOCK_PATIENCE:
-                self.bus.send_direct("trueself", msg)
-                self.wake()
-                return
-            remaining = max(0.05, min(0.5, self._FAST_PATH_LOCK_PATIENCE - elapsed))
-            acquired = self._exec_lock.acquire(timeout=remaining)
-            if not acquired:
-                continue
-            if self._llm_io_in_progress:
-                self._exec_lock.release()
-                now = time.time()
-                if _llm_wait_start is None:
-                    _llm_wait_start = now
-                elif (now - _llm_wait_start) > self._FAST_PATH_LLM_WAIT_MAX:
-                    self.bus.send_direct("trueself", msg)
-                    self.wake()
-                    return
-                time.sleep(0.02)
-                continue
-            try:
-                self._handle_input_inner(msg)
-            finally:
-                self._exec_lock.release()
-            return
-
     def _handle_input(self, msg: Message):
-        """Decide: fast-path (process self) or delegate to a persona."""
+        """Delegate to a specialist persona or process on TrueSelf."""
         slot = msg.response_slot
+        _tid = trace_id_from_message(msg)
+        log_chat_pipeline("trueself.handle_input_before_exec_lock", trace_id=_tid)
         chat_latency.trace_span(slot, "trueself_mailbox_dequeued")
-        self._acquire_exec_when_llm_idle()
+        if self._llm_io_in_progress and _tid:
+            print(
+                "[TrueSelf] User /chat is waiting: packed LLM still running on this agent — "
+                "exec resumes after it finishes (or times out). "
+                "Tune HAROMA_LLM_CONTEXT_TIMEOUT_SEC / HAROMA_FAST_LLM_TIMEOUT_SEC for a lower cap. "
+                f"trace={_tid}",
+                flush=True,
+            )
+        self._acquire_exec_when_llm_idle(wait_trace_id=_tid)
         try:
+            log_chat_pipeline("trueself.handle_input_exec_lock_acquired", trace_id=_tid)
             chat_latency.trace_span(slot, "trueself_exec_lock_acquired")
             self._handle_input_inner(msg)
         finally:
             self._exec_lock.release()
 
-    _FAST_PATH_HARD_TIMEOUT = float(os.environ.get("HAROMA_FAST_PATH_TIMEOUT_SEC", "600") or "600")
-
     def _handle_input_inner(self, msg: Message):
         slot = msg.response_slot
+        _tid = trace_id_from_message(msg)
+        log_chat_pipeline("trueself.input_inner_start", trace_id=_tid)
         chat_latency.trace_span(slot, "trueself_input_inner_start")
-        content_data = msg.content if isinstance(msg.content, dict) else {}
-        depth = str(content_data.get("cycle_depth", "normal") or "normal").lower()
-        if depth == "fast":
-            if slot is not None:
-                slot["_cognitive_route"] = "fast:trueself"
-            try:
-                m = getattr(self.shared, "cognitive_metrics", None)
-                if m is not None:
-                    m.record_route("fast_trueself")
-            except Exception:
-                pass
-            log_cognitive_trace(
-                (msg.metadata or {}).get("cognitive_trace_id"),
-                "route=fast:trueself",
-            )
-            _fast_t0 = time.time()
-            try:
-                chat_latency.trace_span(slot, "trueself_before_persona_cycle")
-                self._process_message(msg, role="conversant")
-            except Exception as exc:
-                print(f"[TrueSelf] Fast-path error: {exc}", flush=True)
-                self._last_response_payload = {
-                    "response": "[processing error]",
-                    "cycle": self.shared.cycle_count,
-                    "affect": {},
-                    "strategy": "error",
-                    "persona": self.agent_id,
-                    "persona_name": self.persona_name,
-                }
-                chat_latency.trace_attach_to_payload(slot, self._last_response_payload)
-            finally:
-                self._complete_input_goal_from_message(msg)
-            _fast_elapsed = time.time() - _fast_t0
-            if _fast_elapsed > self._FAST_PATH_HARD_TIMEOUT:
-                print(
-                    f"[TrueSelf] WARNING: fast-path took {_fast_elapsed:.1f}s "
-                    f"(hard limit {self._FAST_PATH_HARD_TIMEOUT}s)",
-                    flush=True,
-                )
-            slot = msg.response_slot
-            if slot and not slot["event"].is_set():
-                payload = self._last_response_payload or {
-                    "response": "[no response generated]",
-                    "cycle": self.shared.cycle_count,
-                    "affect": {},
-                    "strategy": "fallback",
-                    "persona": self.agent_id,
-                    "persona_name": self.persona_name,
-                }
-                if "latency_trace" not in payload:
-                    chat_latency.trace_attach_to_payload(slot, payload)
-                slot["result"] = payload
-                slot["event"].set()
-            pl = self._last_response_payload
-            if isinstance(pl, dict):
-                self._president_absorb_response(pl, self.agent_id)
-            return
-
         delegation_score, best_persona = self._score_delegation(msg)
         chat_latency.trace_span(slot, "trueself_delegation_scored")
 
         if delegation_score >= self._fast_path_threshold and best_persona is not None:
+            log_chat_pipeline(
+                "trueself.route_delegate",
+                trace_id=_tid,
+                detail=f"target={best_persona.agent_id}",
+            )
             if slot is not None:
                 slot["_cognitive_route"] = f"delegate:{best_persona.agent_id}"
             try:
@@ -281,6 +270,7 @@ class TrueSelfAgent(PersonaAgent):
             )
             self._delegate_to_persona(msg, best_persona)
         else:
+            log_chat_pipeline("trueself.route_self_trueself", trace_id=_tid)
             if slot is not None:
                 slot["_cognitive_route"] = "normal:trueself"
             try:
@@ -293,6 +283,14 @@ class TrueSelfAgent(PersonaAgent):
                 (msg.metadata or {}).get("cognitive_trace_id"),
                 "route=normal:trueself",
             )
+            if is_sensor_pulse_no_chat_text(msg):
+                log_chat_pipeline(
+                    "trueself.sensor_pulse_light",
+                    trace_id=_tid,
+                    detail="skip_full_persona_cycle",
+                )
+                self._complete_input_goal_from_message(msg)
+                return
             try:
                 chat_latency.trace_span(slot, "trueself_before_persona_cycle")
                 self._process_message(msg, role="conversant")
@@ -323,6 +321,7 @@ class TrueSelfAgent(PersonaAgent):
                     chat_latency.trace_attach_to_payload(slot, payload)
                 slot["result"] = payload
                 slot["event"].set()
+                log_chat_pipeline("trueself.self_path_http_slot_set", trace_id=_tid)
             pl = self._last_response_payload
             if isinstance(pl, dict):
                 self._president_absorb_response(pl, self.agent_id)
@@ -404,6 +403,11 @@ class TrueSelfAgent(PersonaAgent):
             }
 
         self.bus.send_direct(persona.agent_id, delegate_msg)
+        log_chat_pipeline(
+            "trueself.delegate_msg_sent",
+            trace_id=trace_id_from_message(msg),
+            detail=f"persona={persona.agent_id}",
+        )
         try:
             persona.wake()
         except Exception as _we:
@@ -445,6 +449,11 @@ class TrueSelfAgent(PersonaAgent):
         if slot:
             slot["result"] = result
             slot["event"].set()
+            log_chat_pipeline(
+                "trueself.persona_response_slot_set",
+                trace_id=trace_id_from_slot(slot),
+                detail=f"delegate={pending.get('delegate_id', '?')}",
+            )
 
         delegate_id = pending.get("delegate_id", "?")
         elapsed = time.time() - pending.get("send_time", time.time())
@@ -553,10 +562,11 @@ class TrueSelfAgent(PersonaAgent):
         if not self._running:
             return
         try:
-            if self.shared.http_chat_inflight > 0:
+            if input_pipeline_busy(self.shared, getattr(self, "_boot_agent", None)):
                 return
         except Exception as _hc:
-            print(f"[TrueSelf] http_chat_inflight check error: {_hc}", flush=True)
+            print(f"[TrueSelf] input_pipeline_busy check error: {_hc}", flush=True)
+            return
         if self._tick_count < 2:
             return
         if self._tick_count % self._IDLE_REFLECT_EVERY != 0:
@@ -608,11 +618,7 @@ class TrueSelfAgent(PersonaAgent):
     # -- override relay: TrueSelf relays to personas, not siblings ----------
 
     def _maybe_relay(self, msg: Message, action: Dict, episode):
-        """After TrueSelf processes a message on the fast path, check if
-        a persona should also see it for a second perspective."""
-        content_data = msg.content if isinstance(msg.content, dict) else {}
-        if str(content_data.get("cycle_depth", "normal") or "normal").lower() == "fast":
-            return
+        """After TrueSelf processes a message, check if a persona should also see it."""
         if not self._boot_agent or not self._boot_agent.persona_agents:
             return
 

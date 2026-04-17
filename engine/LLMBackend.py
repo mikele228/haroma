@@ -116,8 +116,9 @@ def _find_gguf(model_dir: str) -> Optional[str]:
 def _lazy_local_gguf_default() -> bool:
     """If True, defer ``Llama()`` until first local inference (avoids boot-time native crashes).
 
-    ``HAROMA_LLM_LAZY_LOCAL``: ``1``/``0`` overrides. When unset, Windows defaults to
-    lazy; other platforms default to eager load at init.
+    ``HAROMA_LLM_LAZY_LOCAL``: ``1`` defers load; ``0`` loads at init. When unset,
+    all platforms default to **eager** load at boot (including Windows). Set
+    ``HAROMA_LLM_LAZY_LOCAL=1`` if llama-cpp init crashes during boot on your machine.
     """
 
     v = str(os.environ.get("HAROMA_LLM_LAZY_LOCAL", "") or "").strip().lower()
@@ -125,7 +126,7 @@ def _lazy_local_gguf_default() -> bool:
         return True
     if v in ("0", "false", "no", "off"):
         return False
-    return os.name == "nt"
+    return False
 
 
 _REWARD_EMBED_DIM = 384
@@ -434,8 +435,8 @@ class LLMBackend:
       0. ``use_programmed=True`` — rule-based ``ProgrammedLLMResponder`` (env
          ``HAROMA_LLM_ENGINE=programmed`` or soul ``llm.engine``)
       1. API provider (openai / anthropic / google / ollama) if configured
-      2. Local GGUF via llama-cpp-python (on Windows, default ``HAROMA_LLM_LAZY_LOCAL``
-         defers ``Llama()`` until first local inference so boot can finish; set ``0`` to load at init)
+      2. Local GGUF via llama-cpp-python (loads at init by default; set ``HAROMA_LLM_LAZY_LOCAL=1``
+         to defer ``Llama()`` until first local inference if boot-time load crashes)
       3. Unavailable (template fallback in LanguageComposer)
 
     Parameters
@@ -637,7 +638,7 @@ class LLMBackend:
             self._model_name = os.path.basename(path)
             print(
                 f"[LLMBackend] Local GGUF deferred until first use: {self._model_name} "
-                f"(set HAROMA_LLM_LAZY_LOCAL=0 to load during boot)",
+                f"(remove HAROMA_LLM_LAZY_LOCAL or set 0 for boot-time load)",
                 flush=True,
             )
             return
@@ -920,7 +921,8 @@ class LLMBackend:
         Env ``HAROMA_LLM_WARMUP`` (default ``1``): set ``0`` / ``off`` to skip.
         Env ``HAROMA_LLM_WARMUP_MAX_TOKENS`` (default ``24``): cap decode length.
         """
-        if self._local_pending is not None and self._model is None:
+        _pend = getattr(self, "_local_pending", None)
+        if _pend is not None and self._model is None:
             print(
                 "[LLMBackend] Warmup skipped (lazy local GGUF — loads on first chat)",
                 flush=True,
@@ -957,6 +959,22 @@ class LLMBackend:
         except Exception as exc:
             print(f"[LLMBackend] Warmup failed: {exc}", flush=True)
             return False
+
+    def prefetch_lazy_local_if_pending(self) -> None:
+        """Load deferred local GGUF (if any) and run warmup (only when ``HAROMA_LLM_LAZY_LOCAL=1``).
+
+        If lazy init is on, the **first** chat would otherwise pay full disk load + cold decode.
+
+        Env ``HAROMA_LLM_LAZY_PREFETCH`` (default ``1``): set ``0`` to skip background load.
+        """
+        flag = str(os.environ.get("HAROMA_LLM_LAZY_PREFETCH", "1") or "1").strip().lower()
+        if flag in ("0", "false", "no", "off", "skip"):
+            return
+        if self._model is not None or not getattr(self, "_local_pending", None):
+            return
+        print("[LLMBackend] Background prefetch: loading deferred GGUF…", flush=True)
+        self._ensure_local_model()
+        self.warmup_local_inference()
 
     def _generate_api(
         self,

@@ -32,8 +32,8 @@ def input_agent_minimal():
     return ia, shared
 
 
-def test_push_text_legacy_fast_normalized_queues_with_trace(input_agent_minimal):
-    """``depth=fast`` is legacy; same queued path as normal (no synchronous dispatch)."""
+def test_push_text_non_normal_depth_normalized_queues_with_trace(input_agent_minimal):
+    """Unknown ``depth`` values are normalized to ``normal``."""
     ia, shared = input_agent_minimal
 
     slot = ia.push_text("hello", source="user", depth="fast")

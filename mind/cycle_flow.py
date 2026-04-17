@@ -46,6 +46,18 @@ from mind.symbolic_sidecar import apply_derived_symbolic_sidecar
 
 _CF_DEBUG = os.environ.get("ELARION_CYCLE_FLOW_DEBUG", "0") == "1"
 
+# PersonaAgent neural read lock slices (see agents/persona_agent): embed/perception,
+# then gate/backbone/self-model/discourse — then recall+ pipeline without neural lock.
+# Single-message mid-cycle checkpoint/resume across ticks is intentionally out of scope;
+# use short slices + off-lock phases + optional HAROMA_BG_MAX_TRAIN_MODULES_PER_TICK instead.
+PERSONA_NEURAL_PHASES = (
+    "neural_embed_perception",
+    "neural_gate_discourse",
+    "off_lock_recall_through_reasoning",
+    "off_lock_packed_llm",
+    "neural_post_llm",
+)
+
 _MAX_STATE_JSON_CHARS = max(
     512,
     min(100_000, int(os.environ.get("HAROMA_STATE_PROMPT_MAX_CHARS", "3000"))),
@@ -596,9 +608,6 @@ def run_llm_context_reasoning_phase(
             f"[cycle_flow] cognitive_contracts / packed LLM import failed: {_imp_err}",
             flush=True,
         )
-        return _return_skipped(dict(empty))
-
-    if llm_backend is None or not getattr(llm_backend, "available", False):
         return _return_skipped(dict(empty))
 
     _ae = agent_environment

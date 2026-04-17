@@ -62,7 +62,7 @@ def main() -> None:
             print(f"\n{'=' * 60}", flush=True)
             print(f"Turn {i}/{len(USER_TURNS)}", flush=True)
             print(f"User: {user_text}", flush=True)
-            slot = boot.input_agent.push_text(user_text, source="user", depth="fast")
+            slot = boot.input_agent.push_text(user_text, source="user", depth="normal")
             if not slot["event"].wait(timeout=WAIT_PER_TURN):
                 reply = f"[timeout after {WAIT_PER_TURN:.0f}s]"
                 print(f"Elarion: {reply}", flush=True)

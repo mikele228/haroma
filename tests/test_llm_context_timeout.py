@@ -22,8 +22,15 @@ from mind.cognitive_contracts import (
     run_llm_context_reasoning,
     truncate_chat_at_end_marker,
 )
+from mind.cycle_flow import run_llm_context_reasoning_phase
 
 pytestmark = pytest.mark.torch
+
+
+@pytest.fixture(autouse=True)
+def _isolate_llm_dummy_env(monkeypatch):
+    """Project ``.env`` may set ``HAROMA_LLM_DUMMY_REPLY``; clear it unless a test sets it."""
+    monkeypatch.delenv("HAROMA_LLM_DUMMY_REPLY", raising=False)
 
 
 class _SlowBackend:
@@ -224,6 +231,8 @@ class _NoCallBackend:
 
 def test_dummy_reply_skips_generate_chat_and_reports_stats(monkeypatch):
     monkeypatch.setenv("HAROMA_LLM_DUMMY_REPLY", "1")
+    monkeypatch.setenv("HAROMA_LLM_DUMMY_REPLY_VERBOSE", "1")
+    monkeypatch.setenv("HAROMA_LLM_DUMMY_FULL_PACK", "1")
     r = run_llm_context_reasoning(
         llm_backend=_NoCallBackend(),
         user_text="hello probe",
@@ -246,9 +255,171 @@ def test_dummy_reply_skips_generate_chat_and_reports_stats(monkeypatch):
     assert "Skipped generate_chat" in (r.answer or "")
     assert "chars" in (r.answer or "").lower()
     assert "chars_by_role" in (r.answer or "")
+    assert r.raw_json is not None
+    assert "Skipped generate_chat" in (r.raw_json.get("answer") or "")
     assert r.prompt_info is not None
     assert r.prompt_info.get("n_ctx_allocated") == 4096
     assert "prompt_info" in r.to_dict()
+
+
+def test_dummy_reply_default_testing_string(monkeypatch):
+    monkeypatch.setenv("HAROMA_LLM_DUMMY_REPLY", "1")
+    monkeypatch.delenv("HAROMA_LLM_DUMMY_REPLY_VERBOSE", raising=False)
+    r = run_llm_context_reasoning(
+        llm_backend=_NoCallBackend(),
+        user_text="hello",
+        recalled_memories=[],
+        identity_summary={"essence_name": "Test", "vessel": "V"},
+        personality_summary={"openness": 0.5},
+        active_goals=[],
+        law_summary={},
+        value_summary={},
+        knowledge_triples=[],
+        discourse_context="",
+        nlu_result=None,
+        memory_forest_seed="",
+        llm_centric=False,
+        max_tokens=64,
+        temperature=0.3,
+    )
+    assert r.source == "dummy_probe"
+    assert r.answer == "Testing reply"
+    assert r.raw_json is not None
+    assert r.raw_json.get("answer") == "Testing reply"
+    assert r.confidence == 1.0
+    assert r.requires_confirmation is False
+
+
+def test_dummy_reply_custom_text(monkeypatch):
+    monkeypatch.setenv("HAROMA_LLM_DUMMY_REPLY", "1")
+    monkeypatch.setenv("HAROMA_LLM_DUMMY_REPLY_TEXT", "Custom probe OK")
+    r = run_llm_context_reasoning(
+        llm_backend=_NoCallBackend(),
+        user_text="hello",
+        recalled_memories=[],
+        identity_summary={"essence_name": "Test", "vessel": "V"},
+        personality_summary={"openness": 0.5},
+        active_goals=[],
+        law_summary={},
+        value_summary={},
+        knowledge_triples=[],
+        discourse_context="",
+        nlu_result=None,
+        memory_forest_seed="",
+        llm_centric=False,
+        max_tokens=64,
+        temperature=0.3,
+    )
+    assert r.answer == "Custom probe OK"
+    assert r.raw_json is not None
+    assert r.raw_json.get("answer") == "Custom probe OK"
+
+
+def test_dummy_reply_chat_only_is_plain_no_json_layer(monkeypatch):
+    """Match real CHAT_ONLY path: plain answer, no packed JSON parse / raw_json."""
+    monkeypatch.setenv("HAROMA_LLM_DUMMY_REPLY", "1")
+    monkeypatch.setenv("HAROMA_LLM_CHAT_ONLY", "1")
+    monkeypatch.delenv("HAROMA_LLM_DUMMY_REPLY_VERBOSE", raising=False)
+    r = run_llm_context_reasoning(
+        llm_backend=_NoCallBackend(),
+        user_text="hello",
+        recalled_memories=[],
+        identity_summary={"essence_name": "Test", "vessel": "V"},
+        personality_summary={"openness": 0.5},
+        active_goals=[],
+        law_summary={},
+        value_summary={},
+        knowledge_triples=[],
+        discourse_context="",
+        nlu_result=None,
+        memory_forest_seed="",
+        llm_centric=False,
+        max_tokens=64,
+        temperature=0.3,
+    )
+    assert r.source == "dummy_probe"
+    assert r.answer == "Testing reply"
+    assert r.raw_json is None
+    assert r.prompt_info is not None
+    assert r.prompt_info.get("chat_only") is True
+
+
+def test_llm_context_reasoning_phase_dummy_without_backend(monkeypatch):
+    """cycle_flow must reach run_llm_context_reasoning (synthetic reply when no backend)."""
+    monkeypatch.delenv("HAROMA_LLM_DUMMY_REPLY", raising=False)
+    monkeypatch.delenv("HAROMA_LLM_DUMMY_FULL_PACK", raising=False)
+    out = run_llm_context_reasoning_phase(
+        enabled=True,
+        llm_backend=None,
+        user_text="hi",
+        recalled_memories=[],
+        identity_summary={"essence_name": "T", "vessel": "V"},
+        personality_summary={},
+        active_goals=[],
+        law_summary={},
+        value_summary={},
+        episode=None,
+        bind_episode=False,
+    )
+    assert out.get("source") == "dummy_probe"
+    assert out.get("answer") == "Testing reply"
+
+
+def test_dummy_reply_works_when_backend_unavailable(monkeypatch):
+    """Dummy must not depend on a loaded GGUF (probe path for HTTP/cycle only)."""
+    monkeypatch.setenv("HAROMA_LLM_DUMMY_REPLY", "1")
+    monkeypatch.delenv("HAROMA_LLM_DUMMY_FULL_PACK", raising=False)
+    r = run_llm_context_reasoning(
+        llm_backend=None,
+        user_text="hello",
+        recalled_memories=[{"content": "x" * 5000, "tags": []}],
+        identity_summary={"essence_name": "Test", "vessel": "V"},
+        personality_summary={"openness": 0.5},
+        active_goals=[],
+        law_summary={},
+        value_summary={},
+        knowledge_triples=[],
+        discourse_context="",
+        nlu_result=None,
+        memory_forest_seed="",
+        llm_centric=False,
+        max_tokens=64,
+        temperature=0.3,
+    )
+    assert r.source == "dummy_probe"
+    assert r.answer == "Testing reply"
+
+
+def test_dummy_reply_json_override(monkeypatch):
+    monkeypatch.setenv("HAROMA_LLM_DUMMY_REPLY", "1")
+    monkeypatch.setenv(
+        "HAROMA_LLM_DUMMY_REPLY_JSON",
+        '{"answer":"from env json","confidence":0.7,"reasoning_steps":["x"],'
+        '"requires_confirmation":true,"inferences":[],"cited_memories":[],'
+        '"env_updates":{}}',
+    )
+    r = run_llm_context_reasoning(
+        llm_backend=_NoCallBackend(),
+        user_text="hello",
+        recalled_memories=[],
+        identity_summary={"essence_name": "Test", "vessel": "V"},
+        personality_summary={"openness": 0.5},
+        active_goals=[],
+        law_summary={},
+        value_summary={},
+        knowledge_triples=[],
+        discourse_context="",
+        nlu_result=None,
+        memory_forest_seed="",
+        llm_centric=False,
+        max_tokens=64,
+        temperature=0.3,
+    )
+    assert r.source == "dummy_probe"
+    assert r.answer == "from env json"
+    assert r.confidence == 0.7
+    assert r.requires_confirmation is True
+    assert r.raw_json is not None
 
 
 def test_packed_messages_stats_sums_roles():

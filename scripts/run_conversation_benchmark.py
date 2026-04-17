@@ -87,9 +87,9 @@ def main() -> None:
     p.add_argument("--quiet", action="store_true", help="Less stdout; still writes JSONL")
     p.add_argument(
         "--depth",
-        choices=("normal", "fast"),
+        choices=("normal",),
         default="normal",
-        help="POST /chat depth: fast = tighter budget and fewer optional phases",
+        help="POST /chat depth",
     )
     args = p.parse_args()
 

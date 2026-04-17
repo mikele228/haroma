@@ -187,6 +187,7 @@ System health and operational status. Payload is built by `mind.system_snapshot.
   "chat_async_pending": 0,
   "chat_async_ttl_sec": 900,
   "http_chat_inflight": 0,
+  "input_pipeline_busy": false,
   "organs": {},
   "symbolic_queue": {},
   "fingerprint": {},

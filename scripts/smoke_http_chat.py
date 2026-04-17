@@ -1,4 +1,4 @@
-"""Time GET /status and POST /chat (depth=fast). Run while HaromaX6 is listening.
+"""Time GET /status and POST /chat (depth=normal). Run while HaromaX6 is listening.
 
 python scripts/smoke_http_chat.py
 python scripts/smoke_http_chat.py --base http://127.0.0.1:8193
@@ -37,7 +37,7 @@ def main() -> int:
     t0 = time.perf_counter()
     r = requests.post(
         f"{base}/chat",
-        json={"message": "ping", "depth": "fast"},
+        json={"message": "ping", "depth": "normal"},
         timeout=t_chat,
     )
     dt = time.perf_counter() - t0

@@ -326,7 +326,7 @@ class TestApplyEnvUpdates:
 
 
 class TestFallbackBehavior:
-    def test_unavailable_backend_returns_empty(self):
+    def test_unavailable_backend_returns_synthetic_reply(self):
         result = run_llm_context_reasoning(
             llm_backend=None,
             user_text="hello",
@@ -338,8 +338,9 @@ class TestFallbackBehavior:
             value_summary={},
             llm_centric=True,
         )
-        assert result.source == "llm_unavailable"
-        assert not result.has_answer
+        assert result.source == "dummy_probe"
+        assert result.has_answer
+        assert result.answer == "Testing reply"
         assert result.env_updates == {}
 
     def test_no_answer_still_has_env_updates(self):

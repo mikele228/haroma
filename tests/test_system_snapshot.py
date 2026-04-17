@@ -31,6 +31,7 @@ def test_payload_core_keys(monkeypatch: pytest.MonkeyPatch):
             def snapshot(self):
                 return {
                     "http_chat_inflight": 0,
+                    "input_pipeline_busy": False,
                     "http_chat_depth_stack": [],
                     "last_background_training_at": 0.0,
                     "last_background_training_had_effect": False,
@@ -61,6 +62,7 @@ def test_payload_core_keys(monkeypatch: pytest.MonkeyPatch):
     assert out["chat_async_pending"] == 0
     assert out["chat_async_ttl_sec"] == 30.0
     assert out["http_chat_inflight"] == 0
+    assert out["input_pipeline_busy"] is False
     assert out["bg_training_defer_enabled"] is True
     assert out["bg_training_deferred"] is False
     assert out["bg_training_defer_cap_sec"] is None
@@ -98,6 +100,44 @@ def test_defer_fields_when_inflight(monkeypatch: pytest.MonkeyPatch):
     boot = _minimal_boot(shared)
     out = build_http_status_payload(boot, None, None)
     assert out["http_chat_inflight"] == 2
+    assert out["input_pipeline_busy"] is True
+    assert out["bg_training_deferred"] is True
+
+
+def test_defer_when_input_queues_only(monkeypatch: pytest.MonkeyPatch):
+    """Defer matches :func:`mind.chat_priority.input_pipeline_busy`, not HTTP count alone."""
+    monkeypatch.setenv("HAROMA_BG_DEFER_TRAINING_ON_HTTP_CHAT", "1")
+
+    class _Sig:
+        def snapshot(self):
+            return {
+                "http_chat_inflight": 0,
+                "input_pipeline_busy": True,
+                "http_chat_depth_stack": [],
+                "last_background_training_at": 0.0,
+                "last_background_training_had_effect": False,
+            }
+
+    class _IA:
+        def buffer_stats(self):
+            return {"text_pending": 1, "text_priority_pending": 0, "sensor_pending": 0}
+
+    shared = SimpleNamespace(
+        cycle_count=0,
+        memory=SimpleNamespace(count_nodes=lambda: 0),
+        organ_registry=SimpleNamespace(summary=lambda: {}),
+        symbolic_queue=SimpleNamespace(stats=lambda: {}),
+        fingerprint_engine=SimpleNamespace(stats=lambda: {}),
+        reconciliation=SimpleNamespace(stats=lambda: {}),
+        http_chat_inflight=0,
+        _input_agent_ref=_IA(),
+        agent_environment_status=lambda: {},
+        signals=_Sig(),
+    )
+    boot = _minimal_boot(shared)
+    out = build_http_status_payload(boot, None, None)
+    assert out["http_chat_inflight"] == 0
+    assert out["input_pipeline_busy"] is True
     assert out["bg_training_deferred"] is True
 
 

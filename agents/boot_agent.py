@@ -109,6 +109,7 @@ class BootAgent(BaseAgent):
             bus=self.bus,
             tick_interval=input_interval,
         )
+        self.shared._input_agent_ref = self.input_agent
         self._all_agents.append(self.input_agent)
 
         # 4. Spawn TrueSelfAgent

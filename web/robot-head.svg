@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Elarion robot">
+  <defs>
+    <linearGradient id="rh-metal" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#3d444d"/>
+      <stop offset="100%" stop-color="#21262d"/>
+    </linearGradient>
+    <linearGradient id="rh-eye" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#79c0ff"/>
+      <stop offset="100%" stop-color="#58a6ff"/>
+    </linearGradient>
+    <linearGradient id="rh-ant" x1="0%" y1="100%" x2="0%" y2="0%">
+      <stop offset="0%" stop-color="#58a6ff"/>
+      <stop offset="100%" stop-color="#a371f7"/>
+    </linearGradient>
+  </defs>
+  <!-- antenna -->
+  <line x1="32" y1="14" x2="32" y2="7" stroke="#484f58" stroke-width="2.2" stroke-linecap="round"/>
+  <circle cx="32" cy="5" r="3.2" fill="url(#rh-ant)"/>
+  <!-- head -->
+  <rect x="9" y="15" width="46" height="46" rx="15" ry="15" fill="url(#rh-metal)" stroke="#484f58" stroke-width="1.5"/>
+  <!-- visor -->
+  <rect x="13" y="23" width="38" height="20" rx="8" fill="#0d1117" stroke="#30363d" stroke-width="1"/>
+  <!-- eyes -->
+  <ellipse cx="24" cy="33" rx="6" ry="7" fill="url(#rh-eye)"/>
+  <ellipse cx="40" cy="33" rx="6" ry="7" fill="url(#rh-eye)"/>
+  <ellipse cx="21.5" cy="30" rx="2" ry="2.2" fill="#fff" opacity="0.45"/>
+  <ellipse cx="37.5" cy="30" rx="2" ry="2.2" fill="#fff" opacity="0.45"/>
+  <!-- mouth grille -->
+  <g fill="none" stroke="#5c6570" stroke-width="2" stroke-linecap="round">
+    <line x1="20" y1="50" x2="44" y2="50"/>
+    <line x1="20" y1="55" x2="44" y2="55"/>
+  </g>
+</svg>

@@ -22,9 +22,56 @@ from mind.response_text import (
 )
 
 
+def _self_identity_fallback(
+    user_text: str,
+    identity: Optional[Dict[str, Any]],
+    persona_display_name: str,
+) -> Optional[str]:
+    """When the LLM yields no text, still answer basic name/identity questions from config."""
+    t = (user_text or "").strip().lower()
+    if not t:
+        return None
+    markers = (
+        "your name",
+        "what are you called",
+        "who are you",
+        "what's your name",
+        "what is your name",
+        "how should i call you",
+        "what do you call yourself",
+        "introduce yourself",
+        "should i call you",
+        "do you call yourself",
+    )
+    if not any(m in t for m in markers):
+        if "name" in t and len(t) <= 48:
+            pass  # e.g. "name?" / "your name?"
+        else:
+            return None
+    id_ = identity if isinstance(identity, dict) else {}
+    ens = str(id_.get("essence_name") or "").strip()
+    ves = str(id_.get("vessel") or "").strip()
+    display = ens or (persona_display_name or "").strip()
+    if not display:
+        return None
+    if ves and ves.lower() != display.lower():
+        return f"I'm {display}; I go by {ves} here."
+    return f"I'm {display}."
+
+
+def _visible_line(text: str) -> str:
+    """Apply end-marker truncation; empty after truncation is treated as no line."""
+    t = truncate_chat_at_end_marker(text)
+    return t if str(t).strip() else ""
+
+
 def resolve_chat_visible_text(
     action: Dict[str, Any],
     llm_context: Optional[Dict[str, Any]] = None,
+    *,
+    user_text: str = "",
+    identity: Optional[Dict[str, Any]] = None,
+    persona_display_name: str = "",
 ) -> str:
     """Resolve the string shown as ``response`` for chat APIs.
 
@@ -36,14 +83,22 @@ def resolve_chat_visible_text(
     """
     lc = llm_context if isinstance(llm_context, dict) else {}
     src = str(lc.get("source") or "").strip().lower()
-    if src == "llm_context_reasoning":
+    # Prefer model answer for both structured JSON and HAROMA_LLM_CHAT_ONLY plain text;
+    # deliberative action["text"] can still be a placeholder if those paths disagree.
+    if src in ("llm_context_reasoning", "chat_only", "dummy_probe"):
         _parsed = str(lc.get("answer") or "").strip()
         if _parsed:
-            return truncate_chat_at_end_marker(_parsed)
+            vis = _visible_line(_parsed)
+            if vis:
+                return vis
     raw = action.get("text")
     text_out = str(raw).strip() if raw is not None and str(raw).strip() else ""
+    if text_out.strip() == CHAT_RESPONSE_UNKNOWN.strip():
+        text_out = ""
     if text_out:
-        return truncate_chat_at_end_marker(text_out)
+        vis = _visible_line(text_out)
+        if vis:
+            return vis
     if src == "llm_timeout":
         return CHAT_RESPONSE_LLM_TIMEOUT
     if src == "llm_error":
@@ -56,7 +111,12 @@ def resolve_chat_visible_text(
         return CHAT_RESPONSE_LLM_UNAVAILABLE
     _lc_ans = str(lc.get("answer") or "").strip()
     if _lc_ans:
-        return truncate_chat_at_end_marker(_lc_ans)
+        vis = _visible_line(_lc_ans)
+        if vis:
+            return vis
+    fb = _self_identity_fallback(user_text, identity, persona_display_name)
+    if fb:
+        return fb
     return CHAT_RESPONSE_UNKNOWN
 
 
@@ -72,8 +132,22 @@ def normalize_http_chat_response(result: Any) -> Any:
     out = dict(result)
     r = result.get("response")
     lc = out.get("llm_context") if isinstance(out.get("llm_context"), dict) else {}
+    ut = str(out.get("_chat_resolve_user_text") or "").strip()
+    ident = out.get("_chat_resolve_identity")
+    ident_d = ident if isinstance(ident, dict) else None
+    pn = str(out.get("persona_name") or "").strip()
+    kw = dict(
+        user_text=ut,
+        identity=ident_d,
+        persona_display_name=pn,
+    )
     if r is None or (isinstance(r, str) and not r.strip()):
-        out["response"] = resolve_chat_visible_text({"text": ""}, lc)
-        return out
-    out["response"] = resolve_chat_visible_text({"text": str(r)}, lc)
+        out["response"] = resolve_chat_visible_text({"text": ""}, lc, **kw)
+    else:
+        out["response"] = resolve_chat_visible_text({"text": str(r)}, lc, **kw)
+    out.pop("_chat_resolve_user_text", None)
+    out.pop("_chat_resolve_identity", None)
+    _final = out.get("response")
+    if not isinstance(_final, str) or not str(_final).strip():
+        out["response"] = CHAT_RESPONSE_UNKNOWN
     return out

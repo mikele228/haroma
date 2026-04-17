@@ -12,6 +12,8 @@ import time
 import weakref
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
+from mind.chat_priority import input_pipeline_busy
+
 if TYPE_CHECKING:
     from agents.shared_resources import SharedResources
 
@@ -48,6 +50,7 @@ class RuntimeSignals:
             lbt_effect = self.last_background_training_had_effect
         return {
             "http_chat_inflight": inflight,
+            "input_pipeline_busy": input_pipeline_busy(sh, None),
             "http_chat_depth_stack": depths,
             "last_background_training_at": lbt,
             "last_background_training_had_effect": lbt_effect,

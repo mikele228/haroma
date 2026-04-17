@@ -118,7 +118,7 @@ class ProcessGate:
     def clear_bias(self, step_name: str):
         self._biases.pop(step_name, None)
 
-    # Steps safe to skip during fast conversant cycles
+    # Steps safe to skip during conversant cycles (latency vs richness tradeoff)
     _CONVERSANT_SKIP = frozenset(
         {
             "dream_consolidation",
@@ -127,22 +127,6 @@ class ProcessGate:
             "temporal_bind",
             "goal_synthesis",
             "reflection_diagnose",
-        }
-    )
-
-    # Extra skips when POST /chat uses {"depth": "fast"} (latency-critical path)
-    _CHAT_FAST_EXTRA_SKIP = frozenset(
-        {
-            "self_prediction",
-            "interlocutor_model",
-            "kg_integration",
-            "identity_update",
-            "curiosity",
-            "reasoning",
-            "metacognition",
-            "narrative_update",
-            "phrase_extraction",
-            "law_value_myth_fusion",
         }
     )
 

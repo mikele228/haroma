@@ -50,10 +50,34 @@
     justify-content: center;
     box-shadow: 0 0 0 1px var(--border);
   }
-  .logo-img {
+  .robot-live-svg {
     display: block;
     width: 36px;
     height: 36px;
+    flex-shrink: 0;
+    animation: robot-head-glow 3.2s ease-in-out infinite;
+  }
+  #robot-logo.is-thinking .robot-live-svg {
+    animation: robot-head-glow 1.4s ease-in-out infinite;
+  }
+  @keyframes robot-head-glow {
+    0%, 100% { filter: drop-shadow(0 0 3px rgba(88, 166, 255, 0.35)); }
+    50% { filter: drop-shadow(0 0 10px rgba(88, 166, 255, 0.65)); }
+  }
+  #robot-logo.is-thinking #robot-antenna {
+    animation: robot-antenna-wiggle 0.45s ease-in-out infinite alternate;
+    transform-origin: 0 0;
+  }
+  @keyframes robot-antenna-wiggle {
+    from { transform: rotate(-7deg); }
+    to { transform: rotate(7deg); }
+  }
+  .robot-mouth-intense { opacity: 0; pointer-events: none; }
+  #robot-logo[data-intense="1"] .robot-mouth-intense { opacity: 1; }
+  @media (prefers-reduced-motion: reduce) {
+    .robot-live-svg { animation: none; }
+    #robot-logo.is-thinking .robot-live-svg { animation: none; }
+    #robot-logo.is-thinking #robot-antenna { animation: none; }
   }
   .header-info h1 { font-size: 16px; font-weight: 600; }
   .header-info .subtitle { font-size: 12px; color: var(--text-dim); }
@@ -76,6 +100,7 @@
   .main-area {
     display: flex;
     flex: 1;
+    min-height: 0;
     overflow: hidden;
   }
 
@@ -84,6 +109,7 @@
     display: flex;
     flex-direction: column;
     min-width: 0;
+    min-height: 0;
   }
 
   #messages {
@@ -227,58 +253,6 @@
   }
   #cancel-btn:hover { border-color: var(--warm); color: var(--warm); }
 
-  /* Side panel */
-  .side-panel {
-    width: 320px;
-    background: var(--surface);
-    border-left: 1px solid var(--border);
-    overflow-y: auto;
-    padding: 16px;
-    font-size: 12px;
-    flex-shrink: 0;
-    display: none;
-  }
-  .side-panel.open { display: block; }
-  .side-panel h3 {
-    font-size: 11px;
-    text-transform: uppercase;
-    letter-spacing: 1px;
-    color: var(--text-dim);
-    margin: 16px 0 8px;
-  }
-  .side-panel h3:first-child { margin-top: 0; }
-  .stat-grid {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 6px;
-  }
-  .stat-card {
-    background: var(--surface2);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 8px;
-  }
-  .stat-card .label { color: var(--text-dim); font-size: 10px; }
-  .stat-card .value { font-size: 16px; font-weight: 600; margin-top: 2px; }
-
-  .bar-row { margin: 4px 0; }
-  .bar-label {
-    display: flex; justify-content: space-between;
-    color: var(--text-dim); margin-bottom: 2px;
-  }
-  .bar-track {
-    height: 4px;
-    background: var(--border);
-    border-radius: 2px;
-    overflow: hidden;
-  }
-  .bar-fill {
-    height: 100%;
-    border-radius: 2px;
-    background: var(--accent);
-    transition: width 0.5s ease;
-  }
-
   .system-msg {
     text-align: center;
     color: var(--text-dim);
@@ -316,17 +290,102 @@
 </style>
 </head>
 <body>
+<noscript>
+  <p style="padding:16px;background:#3d1111;color:#f0c0c0;font-family:sans-serif;">
+    Enable JavaScript. This chat UI must be loaded from the running Haroma server (e.g. <code>http://127.0.0.1:8193/</code>), not opened as a file from disk.
+  </p>
+</noscript>
+<div id="offline-banner" style="display:none;padding:10px 16px;background:#3d2a11;color:#f0d9a8;font-size:13px;font-family:sans-serif;border-bottom:1px solid #6b4e1e;">
+  <strong>API unreachable.</strong> Start the Elarion server and open this page at the same host/port (e.g. <code>http://127.0.0.1:8193/</code>). Current origin: <code id="api-origin-label"></code>
+</div>
 
 <header>
-  <div class="logo" title="Elarion">
-    <img class="logo-img" src="/assets/elarion-mark.svg" width="36" height="36" alt="Elarion" decoding="async" fetchpriority="high" />
+  <div class="logo" id="robot-logo" title="Elarion" data-face="neutral" data-intense="0" role="img" aria-label="Elarion robot, neutral">
+    <svg class="robot-live-svg" viewBox="0 0 64 64" width="36" height="36" focusable="false" aria-hidden="true">
+      <defs>
+        <linearGradient id="rh-metal" x1="0%" y1="0%" x2="0%" y2="100%">
+          <stop offset="0%" stop-color="#3d444d"/><stop offset="100%" stop-color="#21262d"/>
+        </linearGradient>
+        <linearGradient id="rh-eye" x1="0%" y1="0%" x2="100%" y2="100%">
+          <stop offset="0%" stop-color="#79c0ff"/><stop offset="100%" stop-color="#58a6ff"/>
+        </linearGradient>
+        <linearGradient id="rh-ant" x1="0%" y1="100%" x2="0%" y2="0%">
+          <stop offset="0%" stop-color="#58a6ff"/><stop offset="100%" stop-color="#a371f7"/>
+        </linearGradient>
+      </defs>
+      <g transform="translate(32 14)">
+        <g id="robot-antenna">
+          <line x1="0" y1="0" x2="0" y2="-9" stroke="#484f58" stroke-width="2.2" stroke-linecap="round"/>
+          <circle cx="0" cy="-11" r="3.2" fill="url(#rh-ant)"/>
+        </g>
+      </g>
+      <rect x="9" y="15" width="46" height="46" rx="15" fill="url(#rh-metal)" stroke="#484f58" stroke-width="1.5"/>
+      <rect x="13" y="23" width="38" height="20" rx="8" fill="#0d1117" stroke="#30363d" stroke-width="1"/>
+      <!-- Expressions: keys align with engine EmotionEngine + EpisodeContext / haroma_chat_buddy._FACES -->
+      <g id="face-neutral" class="robot-face">
+        <ellipse cx="24" cy="33" rx="6" ry="7" fill="url(#rh-eye)"/><ellipse cx="40" cy="33" rx="6" ry="7" fill="url(#rh-eye)"/>
+        <ellipse cx="21.5" cy="30" rx="2" ry="2.2" fill="#fff" opacity="0.45"/><ellipse cx="37.5" cy="30" rx="2" ry="2.2" fill="#fff" opacity="0.45"/>
+        <g stroke="#5c6570" stroke-width="2" stroke-linecap="round" fill="none"><line x1="20" y1="50" x2="44" y2="50"/><line x1="20" y1="55" x2="44" y2="55"/></g>
+      </g>
+      <g id="face-joy" class="robot-face" style="display:none">
+        <path fill="url(#rh-eye)" d="M18 33 Q24 28 30 33 Q24 38 18 33 Z"/><path fill="url(#rh-eye)" d="M34 33 Q40 28 46 33 Q40 38 34 33 Z"/>
+        <path fill="none" stroke="#7ae3a8" stroke-width="2.2" stroke-linecap="round" d="M18 54 Q32 46 46 54"/>
+      </g>
+      <g id="face-wonder" class="robot-face" style="display:none">
+        <ellipse cx="24" cy="32" rx="7" ry="8" fill="url(#rh-eye)"/><ellipse cx="40" cy="32" rx="7" ry="8" fill="url(#rh-eye)"/>
+        <path fill="#fff" opacity="0.5" d="M21 28l1.5 3 3 1-3 1-1.5 3-1.5-3-3-1 3-1z"/><path fill="#fff" opacity="0.5" d="M37 28l1.5 3 3 1-3 1-1.5 3-1.5-3-3-1 3-1z"/>
+        <path fill="none" stroke="#d2a8ff" stroke-width="2" stroke-linecap="round" d="M20 52 Q32 47 44 52"/>
+      </g>
+      <g id="face-curiosity" class="robot-face" style="display:none">
+        <path fill="none" stroke="#8b949e" stroke-width="1.4" stroke-linecap="round" d="M17 26 Q24 22 31 26 M33 26 Q40 22 47 26"/>
+        <ellipse cx="24" cy="32" rx="6.5" ry="8" fill="url(#rh-eye)"/><ellipse cx="40" cy="32" rx="6.5" ry="8" fill="url(#rh-eye)"/>
+        <ellipse cx="21" cy="29" rx="2" ry="2.2" fill="#fff" opacity="0.5"/><ellipse cx="37" cy="29" rx="2" ry="2.2" fill="#fff" opacity="0.5"/>
+        <path fill="none" stroke="#58a6ff" stroke-width="2" stroke-linecap="round" d="M22 52 Q32 50 42 52"/>
+      </g>
+      <g id="face-fear" class="robot-face" style="display:none">
+        <ellipse cx="24" cy="33" rx="9" ry="8" fill="#c9d1d9"/><ellipse cx="40" cy="33" rx="9" ry="8" fill="#c9d1d9"/>
+        <ellipse cx="24" cy="33" rx="3.5" ry="4" fill="#0d1117"/><ellipse cx="40" cy="33" rx="3.5" ry="4" fill="#0d1117"/>
+        <ellipse cx="22" cy="31" rx="1.2" ry="1.3" fill="#fff" opacity="0.35"/><ellipse cx="38" cy="31" rx="1.2" ry="1.3" fill="#fff" opacity="0.35"/>
+        <g stroke="#6e7681" stroke-width="2" stroke-linecap="round" fill="none"><line x1="22" y1="52" x2="42" y2="52"/></g>
+      </g>
+      <g id="face-sadness" class="robot-face" style="display:none">
+        <g transform="rotate(-4 32 33)">
+          <ellipse cx="24" cy="34" rx="6" ry="5.5" fill="url(#rh-eye)"/><ellipse cx="40" cy="34" rx="6" ry="5.5" fill="url(#rh-eye)"/>
+          <ellipse cx="21.5" cy="32" rx="1.8" ry="1.6" fill="#fff" opacity="0.4"/><ellipse cx="37.5" cy="32" rx="1.8" ry="1.6" fill="#fff" opacity="0.4"/>
+        </g>
+        <path fill="none" stroke="#79b8ff" stroke-width="2" stroke-linecap="round" d="M20 54 Q32 58 44 54"/>
+      </g>
+      <g id="face-anger" class="robot-face" style="display:none">
+        <path fill="none" stroke="#f85149" stroke-width="2" stroke-linecap="round" d="M16 27 L26 30 M48 27 L38 30"/>
+        <ellipse cx="24" cy="34" rx="5" ry="5" fill="url(#rh-eye)"/><ellipse cx="40" cy="34" rx="5" ry="5" fill="url(#rh-eye)"/>
+        <path fill="none" stroke="#ff7b72" stroke-width="2.2" stroke-linecap="round" d="M20 53 L44 53"/>
+      </g>
+      <g id="face-resolve" class="robot-face" style="display:none">
+        <ellipse cx="24" cy="33" rx="5.5" ry="6.5" fill="url(#rh-eye)"/><ellipse cx="40" cy="33" rx="5.5" ry="6.5" fill="url(#rh-eye)"/>
+        <ellipse cx="21.5" cy="30.5" rx="1.8" ry="1.8" fill="#fff" opacity="0.45"/><ellipse cx="37.5" cy="30.5" rx="1.8" ry="1.8" fill="#fff" opacity="0.45"/>
+        <path fill="none" stroke="#56d364" stroke-width="2" stroke-linecap="round" d="M20 53 Q28 49 32 51 Q36 49 44 53"/>
+      </g>
+      <g id="face-peace" class="robot-face" style="display:none">
+        <rect x="17" y="31" rx="1" ry="1" width="14" height="3.5" fill="url(#rh-eye)"/><rect x="33" y="31" rx="1" ry="1" width="14" height="3.5" fill="url(#rh-eye)"/>
+        <path fill="none" stroke="#8b949e" stroke-width="2" stroke-linecap="round" d="M22 53 Q32 53 42 53"/>
+      </g>
+      <g id="face-surprise" class="robot-face" style="display:none">
+        <circle cx="24" cy="32" r="8" fill="url(#rh-eye)"/><circle cx="40" cy="32" r="8" fill="url(#rh-eye)"/>
+        <circle cx="21" cy="29" r="2.2" fill="#fff" opacity="0.55"/><circle cx="37" cy="29" r="2.2" fill="#fff" opacity="0.55"/>
+        <ellipse cx="32" cy="54" rx="5" ry="7" fill="#21262d" stroke="#58a6ff" stroke-width="1.5"/>
+      </g>
+      <g id="face-melancholy" class="robot-face" style="display:none">
+        <ellipse cx="24" cy="34" rx="5" ry="5" fill="url(#rh-eye)" opacity="0.85"/><ellipse cx="40" cy="34" rx="5" ry="5" fill="url(#rh-eye)" opacity="0.85"/>
+        <path fill="none" stroke="#6e7681" stroke-width="1.8" stroke-linecap="round" d="M22 54 Q32 56 42 54"/>
+      </g>
+      <text class="robot-mouth-intense" x="48" y="38" font-size="14" font-weight="700" fill="#f0883e" font-family="Segoe UI,sans-serif">!</text>
+    </svg>
   </div>
   <div class="header-info">
     <h1>Elarion</h1>
     <div class="subtitle"><span class="pulse" id="pulse"></span>HaromaX6 &mdash; <span id="cycle-counter">cycle 0</span> &mdash; <span id="life-state">booting</span></div>
   </div>
   <div class="header-right">
-    <button onclick="togglePanel()" id="panel-toggle">Mind State</button>
     <button onclick="saveState()">Save</button>
   </div>
 </header>
@@ -340,7 +399,7 @@
 <div class="main-area">
   <div class="chat-panel">
     <div id="messages">
-      <div class="system-msg">Connected to Elarion. Say something to begin. The page uses a streaming wait so long replies do not rely on one endless HTTP request; on CPU, the first reply can still take several minutes while the local model loads.</div>
+      <div class="system-msg">Say something to begin. If you use a local model, the first reply may take a few minutes while it loads.</div>
     </div>
     <div class="typing-indicator" id="typing">
       <span></span><span></span><span></span>
@@ -353,50 +412,22 @@
       </div>
     </div>
   </div>
-
-  <div class="side-panel" id="side-panel">
-    <h3>Emotion</h3>
-    <div id="emotion-display">
-      <div class="bar-row">
-        <div class="bar-label"><span>Valence</span><span id="val-num">0.0</span></div>
-        <div class="bar-track"><div class="bar-fill" id="val-bar" style="width:50%"></div></div>
-      </div>
-      <div class="bar-row">
-        <div class="bar-label"><span>Arousal</span><span id="aro-num">0.0</span></div>
-        <div class="bar-track"><div class="bar-fill" id="aro-bar" style="width:50%;background:var(--warm)"></div></div>
-      </div>
-    </div>
-
-    <h3>Cognitive State</h3>
-    <div class="stat-grid" id="cognitive-stats">
-      <div class="stat-card"><div class="label">Cycle</div><div class="value" id="s-cycle">0</div></div>
-      <div class="stat-card"><div class="label">Memory</div><div class="value" id="s-memory">0</div></div>
-      <div class="stat-card"><div class="label">KG Entities</div><div class="value" id="s-kg">0</div></div>
-      <div class="stat-card"><div class="label">Goals</div><div class="value" id="s-goals">0</div></div>
-    </div>
-
-    <h3>Drives</h3>
-    <div id="drives-display"></div>
-
-    <h3>Strategy</h3>
-    <div id="strategy-display" class="stat-card" style="grid-column:1/-1">
-      <div class="label">Current</div>
-      <div class="value" id="s-strategy">—</div>
-    </div>
-
-    <h3>Metacognition</h3>
-    <div id="meta-display" style="color:var(--text-dim);line-height:1.5;"></div>
-  </div>
 </div>
 
 <script>
 const API = window.location.origin;
-let panelOpen = false;
+(function () {
+  var el = document.getElementById('api-origin-label');
+  if (el) el.textContent = API;
+})();
+let _apiOfflineShown = false;
 
 let _inflightRid = null;
 let _inflightEs = null;
 let _chatPollCancelled = false;
 let _userCancelled = false;
+/** Clears backup poll timer + delayed start from ``fetchChatResult`` (set per in-flight request). */
+let _asyncChatTimersCleanup = null;
 
 function setStopVisible(visible) {
   const b = document.getElementById('cancel-btn');
@@ -407,6 +438,12 @@ function setStopVisible(visible) {
 function cancelInflightChat() {
   _userCancelled = true;
   _chatPollCancelled = true;
+  if (typeof _asyncChatTimersCleanup === 'function') {
+    try {
+      _asyncChatTimersCleanup();
+    } catch (_) {}
+    _asyncChatTimersCleanup = null;
+  }
   if (_inflightEs) {
     try { _inflightEs.close(); } catch (_) {}
     _inflightEs = null;
@@ -417,15 +454,8 @@ function cancelInflightChat() {
   }
 }
 
-window.addEventListener('beforeunload', function () {
-  if (_inflightRid) cancelInflightChat();
-});
-
-function togglePanel() {
-  panelOpen = !panelOpen;
-  document.getElementById('side-panel').classList.toggle('open', panelOpen);
-  document.getElementById('panel-toggle').textContent = panelOpen ? 'Hide Mind' : 'Mind State';
-}
+/* Do not cancel async chat on beforeunload: embedded browsers / focus changes can fire it
+   while a reply is still generating, DELETE removes the request_id and polls return 404. */
 
 function autoResize(el) {
   el.style.height = 'auto';
@@ -469,6 +499,39 @@ function escapeHtml(s) {
   return d.innerHTML;
 }
 
+/** Robot face in header: matches scripts/haroma_chat_buddy.py _FACES keys + EpisodeContext emotions. */
+var ROBOT_FACE_IDS = ['neutral', 'joy', 'wonder', 'curiosity', 'fear', 'sadness', 'anger', 'resolve', 'peace', 'surprise', 'melancholy'];
+function normalizeRobotEmotion(e) {
+  var k = String(e || 'neutral').toLowerCase().trim();
+  if (ROBOT_FACE_IDS.indexOf(k) >= 0) return k;
+  return 'neutral';
+}
+function setRobotThinking(on) {
+  var el = document.getElementById('robot-logo');
+  if (!el) return;
+  if (on) el.classList.add('is-thinking');
+  else el.classList.remove('is-thinking');
+}
+function setRobotFaceFromAffect(affect) {
+  affect = affect || {};
+  var emo = normalizeRobotEmotion(affect.dominant_emotion);
+  var inten = 0;
+  try { inten = Math.min(1, Math.max(0, parseFloat(affect.intensity))); } catch (x) {}
+  var intense = inten > 0.65 && (emo === 'anger' || emo === 'fear' || emo === 'surprise');
+  var logo = document.getElementById('robot-logo');
+  if (!logo) return;
+  for (var i = 0; i < ROBOT_FACE_IDS.length; i++) {
+    var id = ROBOT_FACE_IDS[i];
+    var g = document.getElementById('face-' + id);
+    if (g) g.style.display = (id === emo) ? 'block' : 'none';
+  }
+  logo.setAttribute('data-face', emo);
+  logo.setAttribute('data-intense', intense ? '1' : '0');
+  var aria = 'Elarion robot, ' + emo.replace(/_/g, ' ');
+  if (intense) aria += ', intense';
+  logo.setAttribute('aria-label', aria);
+}
+
 /** Show reply before ``[END_OF_TEXT]``; server uses ``mind.chat_visibility`` / ``mind.cognitive_contracts`` (defense-in-depth). */
 function visibleChatText(s) {
   if (s == null || s === undefined) return '';
@@ -493,61 +556,120 @@ async function pollChatResult(rid) {
   throw new Error('Timed out waiting for reply');
 }
 
-/** Wait for async result via SSE ``GET /chat/wait``; falls back to polling on failure or pending_timeout. */
-function waitChatViaSSE(rid) {
-  return new Promise(function (resolve, reject) {
-    let done = false;
-    const url = API + '/chat/wait?id=' + encodeURIComponent(rid) + '&max_wait_sec=7200';
-    const es = new EventSource(url);
-    _inflightEs = es;
+/**
+ * Push-first async reply: ``EventSource`` on ``GET /chat/wait`` (server streams when ready).
+ * A polling backup on ``GET /chat/result`` starts after ``_POLL_BACKUP_MS`` so stacks where
+ * SSE never fires still complete. Set ``localStorage.setItem('HAROMA_CHAT_POLL_ONLY','1')`` to
+ * disable SSE and poll only.
+ */
+var HAROMA_POLL_BACKUP_MS = 500;
 
-    function finish(ok, val) {
-      if (done) return;
-      done = true;
-      _inflightEs = null;
-      try { es.close(); } catch (_) {}
-      if (ok) resolve(val);
-      else reject(val);
+async function fetchChatResult(rid) {
+  if (typeof EventSource === 'undefined') {
+    return await pollChatResult(rid);
+  }
+  try {
+    if (typeof localStorage !== 'undefined' && localStorage.getItem('HAROMA_CHAT_POLL_ONLY') === '1') {
+      return await pollChatResult(rid);
+    }
+  } catch (_) {}
+
+  return new Promise(function (resolve, reject) {
+    var settled = false;
+    var es = null;
+    var pollIv = null;
+    var delayTo = null;
+
+    function clearTimersOnly() {
+      if (pollIv) {
+        clearInterval(pollIv);
+        pollIv = null;
+      }
+      if (delayTo) {
+        clearTimeout(delayTo);
+        delayTo = null;
+      }
     }
 
-    es.onmessage = function (e) {
-      let data;
-      try {
-        data = JSON.parse(e.data);
-      } catch (x) {
-        finish(false, x);
-        return;
+    function cleanup() {
+      clearTimersOnly();
+      _asyncChatTimersCleanup = null;
+      _inflightEs = null;
+      if (es) {
+        try {
+          es.close();
+        } catch (_) {}
+        es = null;
       }
+    }
+
+    _asyncChatTimersCleanup = clearTimersOnly;
+
+    function settleOk(data) {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(data);
+    }
+
+    function settleErr(err) {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(err);
+    }
+
+    function handleSsePayload(data) {
       if (data.error) {
-        finish(false, new Error(data.error));
+        settleErr(new Error(data.error));
         return;
       }
       if (data.status === 'pending_timeout') {
-        if (done) return;
-        done = true;
-        try { es.close(); } catch (_) {}
-        pollChatResult(rid).then(function (d) { resolve(d); }).catch(function (err) { reject(err); });
+        pollChatResult(rid).then(settleOk).catch(settleErr);
         return;
       }
-      finish(true, data);
+      if (data.status === 'pending') return;
+      settleOk(data);
+    }
+
+    var url = API + '/chat/wait?id=' + encodeURIComponent(rid) + '&max_wait_sec=7200';
+    es = new EventSource(url);
+    _inflightEs = es;
+
+    es.onmessage = function (e) {
+      try {
+        handleSsePayload(JSON.parse(e.data));
+      } catch (x) {
+        settleErr(x);
+      }
     };
 
     es.onerror = function () {
-      finish(false, new Error('EventSource connection failed'));
+      /* Often spurious (reconnect); backup poll still runs. */
     };
-  });
-}
 
-async function fetchChatResult(rid) {
-  if (typeof EventSource !== 'undefined') {
-    try {
-      return await waitChatViaSSE(rid);
-    } catch (e) {
-      if (e && e.message === 'Cancelled') throw e;
-      console.warn('[Elarion UI] SSE wait failed, using poll', e);
-    }
-  }
-  return await pollChatResult(rid);
+    delayTo = setTimeout(function () {
+      if (settled) return;
+      pollIv = setInterval(function () {
+        if (settled) return;
+        if (_chatPollCancelled) {
+          settleErr(new Error('Cancelled'));
+          return;
+        }
+        fetch(API + '/chat/result?id=' + encodeURIComponent(rid))
+          .then(function (r) {
+            if (r.status === 404) throw new Error('Request expired or unknown id');
+            return r.json();
+          })
+          .then(function (data) {
+            if (!settled && data.status !== 'pending') settleOk(data);
+          })
+          .catch(function (err) {
+            if (!settled) settleErr(err);
+          });
+      }, 400);
+    }, HAROMA_POLL_BACKUP_MS);
+  });
 }
 
 const HAROMA_USER_ID_KEY = 'haroma_user_id';
@@ -575,12 +697,13 @@ async function sendMessage() {
   const btn = document.getElementById('send-btn');
   btn.disabled = true;
   document.getElementById('typing').classList.add('active');
+  setRobotThinking(true);
 
   try {
     const res = await fetch(API + '/chat', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({message: text, depth: 'fast', async: true, user_id: getOrCreateUserId()})
+      body: JSON.stringify({message: text, depth: 'normal', async: true, user_id: getOrCreateUserId()})
     });
 
     if (res.status === 503) {
@@ -613,19 +736,21 @@ async function sendMessage() {
 
     document.getElementById('typing').classList.remove('active');
     btn.disabled = false;
+    setRobotThinking(false);
+    setRobotFaceFromAffect(data.affect || {});
 
     const response = visibleChatText(data.response || '...');
     const meta = {
-      emotion: data.affect?.dominant_emotion || '',
+      emotion: (data.affect && data.affect.dominant_emotion) || '',
       strategy: data.strategy || '',
       cycle: data.cycle || 0,
     };
     addMessage(response, 'elarion', meta);
     document.getElementById('cycle-counter').textContent = 'cycle ' + (data.cycle || 0);
-    updateSidePanel(data);
   } catch (err) {
     document.getElementById('typing').classList.remove('active');
     btn.disabled = false;
+    setRobotThinking(false);
     setStopVisible(false);
     _inflightRid = null;
     _inflightEs = null;
@@ -686,13 +811,10 @@ async function saveState() {
 // Boot: fetch introspection
 fetch(API + '/introspect').then(r => r.json()).then(data => {
   const s = data.sentience || {};
-  document.getElementById('s-cycle').textContent = s.cycle_count || 0;
-  document.getElementById('s-memory').textContent = s.memory_nodes || 0;
   document.getElementById('cycle-counter').textContent = 'cycle ' + (s.cycle_count || 0);
 }).catch(() => {});
 
 // Heartbeat: poll /status to show the life loop is running
-let _lastCycle = 0;
 async function pollStatus() {
   try {
     const r = await fetch(API + '/status');
@@ -705,16 +827,21 @@ async function pollStatus() {
     document.getElementById('pulse').className = alive ? 'pulse' : 'pulse dormant';
     document.getElementById('life-state').textContent = alive ? 'alive' : 'dormant';
 
+    var ob = document.getElementById('offline-banner');
+    if (ob) ob.style.display = 'none';
+
     document.getElementById('lb-idle').textContent = ll.idle_cycles || 0;
     document.getElementById('lb-ext').textContent = ll.external_cycles || 0;
-    document.getElementById('lb-buf').textContent = (ll.buffer?.text_pending || 0) + (ll.buffer?.sensor_pending || 0);
+    var buf = ll.buffer || {};
+    document.getElementById('lb-buf').textContent = String((buf.text_pending || 0) + (buf.sensor_pending || 0));
     document.getElementById('lb-err').textContent = ll.errors || 0;
-
-    if (cycle !== _lastCycle) {
-      document.getElementById('s-cycle').textContent = cycle;
-      _lastCycle = cycle;
+  } catch(e) {
+    if (!_apiOfflineShown) {
+      _apiOfflineShown = true;
+      var ob = document.getElementById('offline-banner');
+      if (ob) ob.style.display = 'block';
     }
-  } catch(e) {}
+  }
 }
 pollStatus();
 setInterval(pollStatus, 3000);

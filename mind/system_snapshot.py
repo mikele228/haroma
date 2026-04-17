@@ -1,7 +1,8 @@
 """Assemble GET /status JSON body from booted :class:`agents.boot_agent.BootAgent` state.
 
 Env affecting this payload (see also module docstring in ``mind.elarion_server_v2``):
-``HAROMA_BG_DEFER_TRAINING_ON_HTTP_CHAT``, ``HAROMA_BG_DEFER_TRAINING_CAP_SEC``,
+``HAROMA_BG_DEFER_TRAINING_ON_INPUT_PIPELINE`` (or legacy ``HAROMA_BG_DEFER_TRAINING_ON_HTTP_CHAT``),
+``HAROMA_BG_DEFER_TRAINING_CAP_SEC``,
 ``HAROMA_CHAT_TIMEOUT``, ``HAROMA_FAST_LLM_DEFAULT_TIMEOUT_SEC``,
 ``HAROMA_LLM_CONTEXT_TIMEOUT_SEC`` (via :func:`mind.cognitive_contracts.llm_context_timeout_seconds`).
 Set ``HAROMA_STATUS_SNAPSHOT_DEBUG=1`` for ``logging`` debug lines with tracebacks on partial failures.
@@ -15,8 +16,9 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Protocol
 
 from mind.bg_training_env import (
     bg_training_defer_cap_sec,
-    defer_training_on_http_chat,
+    defer_training_on_input_pipeline,
 )
+from mind.chat_priority import input_pipeline_busy
 from mind.http_chat_timeouts import http_chat_wait_sec
 from mind.cognitive_contracts import llm_context_timeout_seconds
 
@@ -109,9 +111,10 @@ def build_http_status_payload(
         if _snapshot_debug():
             _log.debug("runtime_signals.snapshot", exc_info=True)
 
-    _defer_bg = defer_training_on_http_chat()
+    _defer_bg = defer_training_on_input_pipeline()
     _http_inflight = _resolve_http_inflight(s, _runtime_signals, notes)
-    _bg_training_deferred = bool(_defer_bg and _http_inflight > 0)
+    _pip_busy = input_pipeline_busy(s, boot_agent)
+    _bg_training_deferred = bool(_defer_bg and _pip_busy)
     _bg_defer_cap = bg_training_defer_cap_sec()
 
     _web_learn_status: Optional[dict] = None
@@ -222,6 +225,7 @@ def build_http_status_payload(
         "chat_async_pending": _async_pending,
         "chat_async_ttl_sec": _async_ttl,
         "http_chat_inflight": _http_inflight,
+        "input_pipeline_busy": _pip_busy,
         "bg_training_defer_enabled": _defer_bg,
         "bg_training_deferred": _bg_training_deferred,
         "bg_training_defer_cap_sec": _bg_defer_cap,

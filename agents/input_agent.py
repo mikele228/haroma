@@ -15,9 +15,11 @@ Tick loop:
   4. Forward to TrueSelf via send_direct
 
 User chat uses the **chat** input sensor (see ``sensor_data.chat`` on the
-forwarded message). **User** messages use a priority queue so they are not stuck
-behind bulk/internal traffic. Env ``HAROMA_INPUT_TICK_INTERVAL_SEC`` overrides
-``soul/agents.json`` input.tick_interval (BootAgent).
+forwarded message). Each dispatch adds ``senses_numpy``: canonical per-modality
+``float32`` vectors (empty when unavailable) plus ``text_embedding`` — see
+:mod:`mind.sense_numpy_bundle`. **User** messages use a priority queue so they
+are not stuck behind bulk/internal traffic. Env ``HAROMA_INPUT_TICK_INTERVAL_SEC``
+overrides ``soul/agents.json`` input.tick_interval (BootAgent).
 """
 
 from __future__ import annotations
@@ -34,6 +36,7 @@ import numpy as np
 from agents.base import BaseAgent
 from utils.coerce_bool import json_bool
 from agents.chat_latency import (
+    dummy_reply_auto_latency_trace,
     trace_attach_to_payload,
     trace_init,
     trace_log_requested,
@@ -44,10 +47,34 @@ from agents.message_bus import Message, MessageBus
 from core.cognitive_null import is_cognitive_null
 from mind.user_identity import sanitize_user_id
 from mind.cognitive_observability import new_trace_id
+from mind.chat_pipeline_log import log_chat_pipeline, trace_id_from_slot
+from mind.sense_numpy_bundle import build_senses_numpy_bundle
 
 if TYPE_CHECKING:
     from agents.shared_resources import SharedResources
     from agents.boot_agent import BootAgent
+
+
+def normalize_chat_inline_sensor_data(raw: Any) -> Optional[Dict[str, Any]]:
+    """Normalize ``sensor_data`` / ``sensors`` from POST /chat into the internal
+    channel → list-of-readings shape used with :meth:`push_sensor`.
+
+    Each value may be a single object or a list; values are capped for safety.
+    """
+    if not isinstance(raw, dict) or not raw:
+        return None
+    out: Dict[str, Any] = {}
+    for i, (k, v) in enumerate(raw.items()):
+        if i >= 64:
+            break
+        key = str(k).strip()[:120]
+        if not key:
+            continue
+        if isinstance(v, list):
+            out[key] = v[:48]
+        elif v is not None:
+            out[key] = [v]
+    return out or None
 
 
 class InputAgent(BaseAgent):
@@ -102,7 +129,7 @@ class InputAgent(BaseAgent):
         self,
         message: str,
         source: str = "user",
-        depth: str = "normal",  # legacy ``fast`` is normalized to ``normal`` (fast path removed)
+        depth: str = "normal",
         wake_callback=None,
         debug_recall: bool = False,
         trace_latency: bool = False,
@@ -111,11 +138,15 @@ class InputAgent(BaseAgent):
         user_id: Optional[str] = None,
         display_name: Optional[str] = None,
         experiment_id: Optional[str] = None,
+        inline_sensor_data: Optional[Dict[str, Any]] = None,
     ) -> Dict:
         """Push a text stimulus. Returns a slot dict with an Event.
 
-        *depth* is accepted for API compatibility; only the full input pipeline
-        is used (``fast`` is treated as ``normal``).
+        *inline_sensor_data* optional map ``channel -> reading | [readings]`` merged
+        into this turn's ``sensor_data`` (same contract as POST ``/sensor``), e.g.
+        lidar/gps alongside ``message`` when POSTing bundled JSON to ``/chat``.
+
+        *depth* is accepted for API compatibility and normalized to ``normal``.
         *debug_recall* adds ``recall_debug`` to the HTTP result payload.
         *trace_latency* (or env HAROMA_CHAT_TRACE) adds ``latency_trace`` timings
         to the JSON reply.
@@ -138,15 +169,13 @@ class InputAgent(BaseAgent):
         _tid = new_trace_id()
         slot["cognitive_trace_id"] = _tid
         _trace_flag = json_bool(trace_latency, False)
-        if _trace_flag or trace_requested():
+        if _trace_flag or trace_requested() or dummy_reply_auto_latency_trace():
             trace_init(
                 slot,
                 log_to_console=_trace_flag or trace_log_requested(),
             )
         d = str(depth or "normal").lower()
-        if d == "fast":
-            d = "normal"
-        elif d != "normal":
+        if d != "normal":
             d = "normal"
         item = {
             "content": message,
@@ -168,6 +197,8 @@ class InputAgent(BaseAgent):
         if experiment_id is not None and str(experiment_id).strip():
             item["experiment_id"] = str(experiment_id).strip()[:200]
         item["cognitive_trace_id"] = _tid
+        if inline_sensor_data:
+            item["_inline_sensor_data"] = inline_sensor_data
         _pq = d == "normal" and str(source or "").lower() == "user"
         _target = self._text_queue_priority if _pq else self._text_queue
         with self._lock:
@@ -189,6 +220,11 @@ class InputAgent(BaseAgent):
             wake_callback()
         else:
             self.wake()
+        log_chat_pipeline(
+            "input.push_text_queued",
+            trace_id=_tid,
+            detail=f"queue={'priority' if _pq else 'normal'}",
+        )
         return slot
 
     def push_sensor(self, channel: str, data: Dict):
@@ -241,7 +277,14 @@ class InputAgent(BaseAgent):
         if text:
             desc_parts.append(text[:120])
         if sensor_channels:
-            desc_parts.append(f"sensors:{','.join(sensor_channels)}")
+            # Avoid goal descriptions that are only ``sensors:vision`` — those pollute
+            # inner-dialogue / rumination topic picks (see PersonaAgent._pick_rumination_topic).
+            if text:
+                desc_parts.append(f"sensors:{','.join(sensor_channels)}")
+            else:
+                desc_parts.append(
+                    f"Multimodal tick ({','.join(sensor_channels)})",
+                )
         description = " | ".join(desc_parts) or "input_cycle"
         try:
             self.shared.goal.register_input_goal(
@@ -263,18 +306,19 @@ class InputAgent(BaseAgent):
     ) -> None:
         """NLU + encoder + forward one text item to TrueSelf."""
         slot = item.pop("_slot", None)
+        _ptid = trace_id_from_slot(slot if isinstance(slot, dict) else None)
+        log_chat_pipeline("input.dispatch_start", trace_id=_ptid)
         trace_span(slot, "input_queue_wait")
         content = item.get("content", "")
         source = item.get("source", "user")
         tags = item.get("tags", [])
         depth = str(item.get("depth", "normal") or "normal").lower()
-        if depth == "fast":
-            depth = "normal"
-        elif depth != "normal":
+        if depth != "normal":
             depth = "normal"
 
         nlu_base = self._lightweight_nlu(content)
         trace_span(slot, "input_nlu")
+        log_chat_pipeline("input.after_nlu", trace_id=_ptid)
 
         embedding = None
         _encoder_real = self.shared.encoder is not None and not is_cognitive_null(
@@ -282,6 +326,7 @@ class InputAgent(BaseAgent):
         )
         if _encoder_real and content:
             try:
+                log_chat_pipeline("input.before_encoder_neural_sync", trace_id=_ptid)
                 with self.shared.neural_sync():
                     raw_emb = self.shared.encoder.encode(content)
                 if raw_emb is not None:
@@ -299,11 +344,26 @@ class InputAgent(BaseAgent):
                 print(f"[InputAgent] encoder error: {exc}", flush=True)
 
         trace_span(slot, "input_encoder")
+        log_chat_pipeline("input.after_encoder", trace_id=_ptid)
 
         # Merge multimodal sensors with the **chat** input sensor (same shape as ``push_sensor``).
         _sensor_payload: Dict[str, Any] = {}
         if merged_sensor_data:
             _sensor_payload.update(merged_sensor_data)
+        _inline = item.pop("_inline_sensor_data", None)
+        if isinstance(_inline, dict) and _inline:
+            for ch, readings in _inline.items():
+                chs = str(ch).strip()[:120]
+                if not chs:
+                    continue
+                if readings is None:
+                    continue
+                if isinstance(readings, list):
+                    _sensor_payload.setdefault(chs, []).extend(
+                        x for x in readings[:48] if x is not None
+                    )
+                else:
+                    _sensor_payload.setdefault(chs, []).append(readings)
         if content:
             _sensor_payload.setdefault("chat", []).append(
                 {
@@ -330,6 +390,7 @@ class InputAgent(BaseAgent):
         _uid = item.get("user_id")
         _dn = item.get("display_name")
         _ctid = item.get("cognitive_trace_id")
+        _senses_numpy = build_senses_numpy_bundle(_sensor_payload, text_embedding=embedding)
         _content_payload: Dict[str, Any] = {
             "text": content,
             "source": source,
@@ -337,6 +398,7 @@ class InputAgent(BaseAgent):
             "nlu_base": nlu_base,
             "embedding": embedding,
             "sensor_data": _sensor_payload,
+            "senses_numpy": _senses_numpy,
             "cycle_depth": depth,
             "debug_recall": json_bool(item.get("debug_recall"), False),
             "communication_debug": json_bool(item.get("communication_debug"), False),
@@ -365,8 +427,10 @@ class InputAgent(BaseAgent):
         )
 
         trace_span(slot, "input_to_trueself_handoff")
+        log_chat_pipeline("input.before_send_to_trueself", trace_id=_ptid)
 
         self.bus.send_direct(self._TRUESELF_ID, msg)
+        log_chat_pipeline("input.after_send_to_trueself", trace_id=_ptid)
 
         if slot is not None and self._boot_agent is not None:
             try:

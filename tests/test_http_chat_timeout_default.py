@@ -30,14 +30,14 @@ def test_invalid_haroma_chat_timeout_falls_back_to_llm_margin(monkeypatch):
     assert w >= 540
 
 
-def test_http_wait_legacy_fast_arg_same_as_normal(monkeypatch):
-    """``depth`` is legacy; ``fast`` and ``normal`` use the same HTTP wait."""
+def test_http_wait_sec_ignores_depth_argument(monkeypatch):
+    """``http_chat_wait_sec`` does not vary by depth string."""
     monkeypatch.delenv("HAROMA_CHAT_TIMEOUT", raising=False)
     monkeypatch.setenv("HAROMA_FAST_LLM_DEFAULT_TIMEOUT_SEC", "90")
     monkeypatch.setenv("HAROMA_LLM_CONTEXT_TIMEOUT_SEC", "360")
     from mind.elarion_server_v2 import _http_chat_wait_sec
 
-    assert _http_chat_wait_sec("fast") == _http_chat_wait_sec("normal")
+    assert _http_chat_wait_sec("normal") == _http_chat_wait_sec("legacy-anything")
 
 
 def test_json_bool_does_not_treat_string_false_as_true():

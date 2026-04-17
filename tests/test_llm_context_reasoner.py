@@ -402,7 +402,7 @@ class TestLLMContextResult:
 
 
 class TestRunLLMContextReasoning:
-    def test_unavailable_backend(self):
+    def test_unavailable_backend_uses_synthetic_dummy(self):
         result = run_llm_context_reasoning(
             llm_backend=None,
             user_text="hello",
@@ -413,7 +413,8 @@ class TestRunLLMContextReasoning:
             law_summary={},
             value_summary={},
         )
-        assert result.source == "llm_unavailable"
+        assert result.source == "dummy_probe"
+        assert result.answer == "Testing reply"
 
     def test_with_mock_backend(self):
         backend = MagicMock()

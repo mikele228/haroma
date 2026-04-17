@@ -55,6 +55,13 @@ class CognitiveMetrics:
         self._last_input_queue_total: int = 0
         self._llm_wait_ms: Deque[float] = deque(maxlen=sample_cap)
         self._persona_cycle_ms: Deque[float] = deque(maxlen=sample_cap)
+        # Shared neural RW / persona gate: increments when hold time exceeds budget
+        self.shared_lock_over_budget: Counter[str] = Counter()
+
+    def record_shared_lock_over_budget(self, lock_name: str) -> None:
+        """Increment when a shared lock hold (after acquire) exceeded ``HAROMA_SHARED_LOCK_BUDGET_SEC``."""
+        with self._lock:
+            self.shared_lock_over_budget[lock_name] += 1
 
     def on_chat_turn_started(self) -> None:
         with self._lock:
@@ -144,6 +151,7 @@ class CognitiveMetrics:
                 "routes": routes,
                 "delegation_timeouts": self.delegation_timeouts,
                 "reconcile_runs": self.reconcile_runs,
+                "shared_lock_over_budget": dict(self.shared_lock_over_budget),
                 "input_queue_depth_last": q,
                 "llm_wait_ms": llm,
                 "persona_cycle_ms": cyc,

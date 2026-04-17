@@ -108,7 +108,7 @@ def main() -> None:
             turn_logs: List[Dict[str, str]] = []
 
             for ti, user_text in enumerate(USER_TURNS, start=1):
-                slot = boot.input_agent.push_text(user_text, source="user", depth="fast")
+                slot = boot.input_agent.push_text(user_text, source="user", depth="normal")
                 if not slot["event"].wait(timeout=WAIT_PER_TURN):
                     reply = f"[timeout {WAIT_PER_TURN:.0f}s]"
                 else:

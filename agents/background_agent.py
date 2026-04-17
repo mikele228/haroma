@@ -41,6 +41,7 @@ _DIALOG_LINE_CACHE: Optional[List[str]] = None
 
 from agents.base import BaseAgent
 from agents.message_bus import Message, MessageBus
+from mind.chat_priority import chat_input_priority_defer_non_user, input_pipeline_busy
 from utils.coerce_bool import env_flag
 
 from core.Memory import MemoryNode
@@ -146,7 +147,7 @@ class BackgroundAgent(BaseAgent):
 
         wl_cfg = bg_cfg.get("web_learn")
         self._web_crawler = WebLearnCrawler(wl_cfg if isinstance(wl_cfg, dict) else {})
-        self._cadence = BackgroundCadence(shared)
+        self._cadence = BackgroundCadence(shared, boot_agent=self._boot_agent)
         if self._web_crawler.enabled and (
             not self._web_crawler.seed_urls or not self._web_crawler.allowed_hosts
         ):
@@ -169,6 +170,9 @@ class BackgroundAgent(BaseAgent):
         self._last_training_losses: Dict[str, float] = {}
         self._last_finetune_flush_n: int = 0
         self._last_memory_export_n: int = 0
+        # Round-robin cursor when ``HAROMA_BG_MAX_TRAIN_MODULES_PER_TICK`` limits
+        # how many ``neural_train_sync`` sections run per tick (shorter write locks).
+        self._bg_train_cursor: int = 0
 
         # Cognitive loop buffers (dream <-> goal <-> dialogue <-> experience)
         self._dream_context: Dict[str, Any] = {}
@@ -208,71 +212,75 @@ class BackgroundAgent(BaseAgent):
             # -- 1. Process dead-letter messages ---------------------------
             self._process_dead_letters()
 
-            # -- 2. Reconciliation (merge persona branches) ----------------
-            if tc % self._reconcile_every == 0:
-                self._reconcile()
+            if chat_input_priority_defer_non_user(s, self._boot_agent):
+                if s.persistence and s.persistence.should_save(s.cycle_count):
+                    self._save()
+            else:
+                # -- 2. Reconciliation (merge persona branches) ----------------
+                if tc % self._reconcile_every == 0:
+                    self._reconcile()
 
-            # -- 3. Dream consolidation ------------------------------------
-            if _dream_periodic or _dream_urgent:
-                self._dream()
+                # -- 3. Dream consolidation ------------------------------------
+                if _dream_periodic or _dream_urgent:
+                    self._dream()
 
-            # -- 4. Goal synthesis -----------------------------------------
-            if _do_goal:
-                self._goal_synthesis()
+                # -- 4. Goal synthesis -----------------------------------------
+                if _do_goal:
+                    self._goal_synthesis()
 
-            # -- 5. Training steps (often the long pole; log boundaries) ---
-            if self._training_enabled:
-                _t_tr = time.time()
-                if _hb:
-                    print(
-                        f"[BackgroundAgent] training_begin n={tc}",
-                        flush=True,
-                    )
-                try:
-                    self._run_training()
-                finally:
+                # -- 5. Training steps (often the long pole; log boundaries) ---
+                if self._training_enabled:
+                    _t_tr = time.time()
                     if _hb:
                         print(
-                            f"[BackgroundAgent] training_end n={tc} dt={time.time() - _t_tr:.2f}s",
+                            f"[BackgroundAgent] training_begin n={tc}",
                             flush=True,
                         )
+                    try:
+                        self._run_training()
+                    finally:
+                        if _hb:
+                            print(
+                                f"[BackgroundAgent] training_end n={tc} dt={time.time() - _t_tr:.2f}s",
+                                flush=True,
+                            )
 
-            # -- 5a. Finetune flush + memory training export (online / continuous) ---
-            self._maybe_flush_training_artifacts(tc)
+                # -- 5a. Finetune flush + memory training export (online / continuous) ---
+                self._maybe_flush_training_artifacts(tc)
 
-            # -- 5b. Web learn (allowlist fetch → memory) -------------------
-            if _do_web:
-                self._run_web_learn()
+                # -- 5b. Web learn (allowlist fetch → memory) -------------------
+                if _do_web:
+                    self._run_web_learn()
 
-            # -- 6. Persistence save ---------------------------------------
-            if s.persistence and s.persistence.should_save(s.cycle_count):
-                self._save()
+                # -- 6. Persistence save ---------------------------------------
+                if s.persistence and s.persistence.should_save(s.cycle_count):
+                    self._save()
 
-            # -- 7. Narrative update ---------------------------------------
-            if tc % 4 == 0:
-                self._update_narrative()
+                # -- 7. Narrative update ---------------------------------------
+                if tc % 4 == 0:
+                    self._update_narrative()
 
-            # -- 8. Architecture search ------------------------------------
-            if tc % 6 == 0:
-                self._arch_search()
+                # -- 8. Architecture search ------------------------------------
+                if tc % 6 == 0:
+                    self._arch_search()
 
-            # -- 9. Dynamic persona spawning check -------------------------
-            if tc % 10 == 0 and tc > 0:
-                self._check_spawn_persona()
+                # -- 9. Dynamic persona spawning check -------------------------
+                if tc % 10 == 0 and tc > 0:
+                    self._check_spawn_persona()
 
-            # -- 10. Initiate inner dialogue on divergence -----------------
-            if tc % 8 == 0 and tc > 0:
-                self._initiate_inner_dialogue()
+                # -- 10. Initiate inner dialogue on divergence -----------------
+                if tc % 8 == 0 and tc > 0:
+                    self._initiate_inner_dialogue()
 
-            # -- 11. Collect dialogue insights from bus ---------------------
-            self._collect_dialogue_insights()
+                # -- 11. Collect dialogue insights from bus ---------------------
+                self._collect_dialogue_insights()
 
-            # -- 12. Update outcome window from personas -------------------
-            self._update_outcome_window()
+                # -- 12. Update outcome window from personas -------------------
+                self._update_outcome_window()
 
-            # -- 13. Autonomous initiative (memory commitments, no user msg) -
-            if self._autonomy_enabled and tc > 0 and tc % self._autonomy_every == 0:
-                self._autonomous_initiative_tick()
+                # -- 13. Autonomous initiative (memory commitments, no user msg) -
+                if self._autonomy_enabled and tc > 0 and tc % self._autonomy_every == 0:
+                    self._autonomous_initiative_tick()
 
         except Exception as exc:
             _tick_err = f"{type(exc).__name__}: {exc}"
@@ -401,10 +409,11 @@ class BackgroundAgent(BaseAgent):
             return
         s = self.shared
         try:
-            if s.http_chat_inflight > 0:
+            if input_pipeline_busy(s, self._boot_agent):
                 return
         except Exception as _hc:
-            print(f"[BackgroundAgent] http_chat_inflight check error: {_hc}", flush=True)
+            print(f"[BackgroundAgent] input_pipeline_busy check error: {_hc}", flush=True)
+            return
         if not _is_real(s.memory):
             return
 
@@ -1018,6 +1027,14 @@ class BackgroundAgent(BaseAgent):
                     print(f"[BackgroundAgent] memory training export error: {exc}", flush=True)
 
     def _run_training(self):
+        """Run scheduled training modules, each under its own ``neural_train_sync``.
+
+        Every module is a single ``train_fn()`` call while holding the write lock.
+        A long-running ``train_fn`` (e.g. large encoder step) can still exceed
+        ``HAROMA_SHARED_LOCK_BUDGET_SEC``; shorten the step inside the module or set
+        ``HAROMA_BG_MAX_TRAIN_MODULES_PER_TICK`` to spread *modules* across ticks
+        (does not split one module's ``train_fn``).
+        """
         s = self.shared
         ts = s.training_scheduler
         if not _is_real(ts):
@@ -1027,14 +1044,30 @@ class BackgroundAgent(BaseAgent):
         losses = {}
 
         _train_map = build_background_train_map(s)
+        nmap = len(_train_map)
+        raw_cap = str(os.environ.get("HAROMA_BG_MAX_TRAIN_MODULES_PER_TICK", "") or "").strip()
+        try:
+            cap = int(raw_cap) if raw_cap else 0
+        except (TypeError, ValueError):
+            cap = 0
+
+        if cap <= 0 or nmap == 0 or cap >= nmap:
+            train_pairs = list(_train_map)
+        else:
+            take = min(cap, nmap)
+            idxs = [(self._bg_train_cursor + j) % nmap for j in range(take)]
+            train_pairs = [_train_map[i] for i in idxs]
+            self._bg_train_cursor = (self._bg_train_cursor + take) % nmap
 
         # One lock per module so persona / HTTP paths can interleave between
         # train steps; a single giant ``with neural_sync()`` could stall this
         # tick (and all tick_begin/tick_end logs) for a very long time.
-        for module_name, train_fn in _train_map:
+        # Optional ``HAROMA_BG_MAX_TRAIN_MODULES_PER_TICK`` spreads modules across
+        # background ticks so each write lock is shorter (cooperative budget).
+        for module_name, train_fn in train_pairs:
             if ts.should_train(module_name):
                 try:
-                    with s.neural_sync():
+                    with s.neural_train_sync():
                         loss = train_fn()
                     if loss is not None:
                         ts.record_loss(module_name, loss)

@@ -53,33 +53,31 @@ def main() -> int:
     time.sleep(1.5)
 
     results = []
-    for depth in ("fast", "normal"):
-        print(f"\n--- depth={depth} ---", flush=True)
-        for msg in MESSAGES:
-            t0 = time.perf_counter()
-            slot = boot.input_agent.push_text(
-                msg,
-                source="bench",
-                depth=depth,
-                trace_latency=True,
-            )
-            # fast completes inside push_text; wait() then returns immediately.
-            ok = slot["event"].wait(timeout=240.0)
-            dt = time.perf_counter() - t0
-            res = slot.get("result") or {}
-            lt = res.get("latency_trace") or {}
-            line = f"  {dt:.2f}s wall | trace_total={lt.get('total_ms')}ms | {_top_spans(lt)}"
-            print(line, flush=True)
-            if not ok:
-                print("  TIMEOUT", flush=True)
-            results.append((depth, msg, dt, lt))
+    depth = "normal"
+    print(f"\n--- depth={depth} ---", flush=True)
+    for msg in MESSAGES:
+        t0 = time.perf_counter()
+        slot = boot.input_agent.push_text(
+            msg,
+            source="bench",
+            depth=depth,
+            trace_latency=True,
+        )
+        ok = slot["event"].wait(timeout=240.0)
+        dt = time.perf_counter() - t0
+        res = slot.get("result") or {}
+        lt = res.get("latency_trace") or {}
+        line = f"  {dt:.2f}s wall | trace_total={lt.get('total_ms')}ms | {_top_spans(lt)}"
+        print(line, flush=True)
+        if not ok:
+            print("  TIMEOUT", flush=True)
+        results.append((depth, msg, dt, lt))
 
     print("\n=== summary ===", flush=True)
-    for depth in ("fast", "normal"):
-        xs = [r[2] for r in results if r[0] == depth]
-        if xs:
-            mean = sum(xs) / len(xs)
-            print(f"  {depth}: n={len(xs)} mean={mean:.2f}s max={max(xs):.2f}s", flush=True)
+    xs = [r[2] for r in results if r[0] == depth]
+    if xs:
+        mean = sum(xs) / len(xs)
+        print(f"  {depth}: n={len(xs)} mean={mean:.2f}s max={max(xs):.2f}s", flush=True)
 
     print("\n[measure_chat_delays] shutdown...", flush=True)
     boot.save_and_shutdown()

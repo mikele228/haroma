@@ -21,7 +21,9 @@ def test_trace_span_and_attach():
     trace_span(slot, "phase_a")
     time.sleep(0.005)
     trace_span(slot, "phase_b")
-    payload: dict = {}
+    payload: dict = {
+        "llm_context": {"latency_ms": 2.5, "source": "llm_context_reasoning"},
+    }
     trace_attach_to_payload(slot, payload)
 
     assert "latency_trace" in payload
@@ -33,6 +35,18 @@ def test_trace_span_and_attach():
     assert names[1] == "phase_b"
     assert names[2] == "response_finalize"
     assert lt["spans"][1]["ms"] >= 0
+    assert lt["llm_context_latency_ms"] == 2.5
+    assert lt["non_llm_wall_ms_approx"] == round(lt["total_ms"] - 2.5, 2)
+
+
+def test_trace_attach_synthetic_llm_flag(monkeypatch):
+    monkeypatch.setenv("HAROMA_LLM_DUMMY_REPLY", "1")
+    slot: dict = {}
+    trace_init(slot, log_to_console=False)
+    trace_span(slot, "x")
+    payload: dict = {"llm_context": {"latency_ms": 0.1}}
+    trace_attach_to_payload(slot, payload)
+    assert payload["latency_trace"]["synthetic_llm"] is True
 
 
 def test_trace_noop_without_init():

@@ -7,7 +7,7 @@ Requires a running server (python main.py). Default:
 
 Usage:
   python scripts/bulk_teach_by_category.py
-  python scripts/bulk_teach_by_category.py --url http://127.0.0.1:8193 --count 1000 --depth fast
+  python scripts/bulk_teach_by_category.py --url http://127.0.0.1:8193 --count 1000
   python scripts/bulk_teach_by_category.py --schedule mixed --mixed-every 8 --count 500
 """
 
@@ -213,13 +213,9 @@ def _chunk_metrics(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
-def _depth_for_index(schedule: str, idx: int, mixed_every: int, uniform_depth: str) -> str:
-    """1-based message index."""
-    if schedule == "mixed":
-        if mixed_every > 0 and idx % mixed_every == 0:
-            return "normal"
-        return "fast"
-    return uniform_depth
+def _chat_depth() -> str:
+    """POST /chat depth (only ``normal`` is supported)."""
+    return "normal"
 
 
 def main() -> None:
@@ -228,15 +224,15 @@ def main() -> None:
     ap.add_argument("--count", type=int, default=1000)
     ap.add_argument(
         "--depth",
-        default="fast",
-        choices=("fast", "normal"),
-        help="Per-message depth when --schedule uniform",
+        default="normal",
+        choices=("normal",),
+        help="POST /chat depth (only ``normal`` is supported)",
     )
     ap.add_argument(
         "--schedule",
         default="uniform",
         choices=("uniform", "mixed"),
-        help="uniform: all messages use --depth; mixed: fast with every Nth normal",
+        help="uniform: all messages use normal depth; mixed is legacy (same as uniform)",
     )
     ap.add_argument(
         "--mixed-every",
@@ -283,7 +279,7 @@ def main() -> None:
     )
 
     for idx, (cat, message) in enumerate(schedule, start=1):
-        depth_used = _depth_for_index(args.schedule, idx, args.mixed_every, args.depth)
+        depth_used = _chat_depth()
         t0 = time.time()
         err = None
         resp_text = ""

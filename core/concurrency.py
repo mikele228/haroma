@@ -50,6 +50,43 @@ class NeuralTrainingLocks:
     language_composer_data: threading.Lock
 
 
+class NeuralRWLock:
+    """Readers–writer lock for shared neural weights.
+
+    *Inference* (input encoder, persona forwards) takes the **read** side so
+    multiple threads can overlap. *Background training* takes the **write** side
+    exclusively so optimizer updates never race forward passes.
+    """
+
+    def __init__(self) -> None:
+        self._cond = threading.Condition(threading.Lock())
+        self._readers = 0
+        self._writer = False
+
+    def acquire_read(self) -> None:
+        with self._cond:
+            while self._writer:
+                self._cond.wait()
+            self._readers += 1
+
+    def release_read(self) -> None:
+        with self._cond:
+            self._readers -= 1
+            if self._readers == 0:
+                self._cond.notify_all()
+
+    def acquire_write(self) -> None:
+        with self._cond:
+            while self._readers > 0 or self._writer:
+                self._cond.wait()
+            self._writer = True
+
+    def release_write(self) -> None:
+        with self._cond:
+            self._writer = False
+            self._cond.notify_all()
+
+
 class ConcurrencyCoordinator:
     """Owns shared Lock/RLock instances and provides ordered multi-lock helpers."""
 

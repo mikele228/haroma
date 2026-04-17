@@ -60,9 +60,8 @@ class HaromaBanditChatEnv(gym.Env):
         self._tasks = list(tasks) if tasks else [""]
         self._reward_fn = reward_fn or self._default_reward
         self._build: MessageFn = build_message or self._default_build_message
-        # Server maps chat depth=fast to normal; align client to avoid confusion.
-        d = str(depth or "normal").lower()
-        self._depth = "normal" if d == "fast" else d
+        _ = str(depth or "normal").lower()  # legacy parameter; HTTP chat uses normal only
+        self._depth = "normal"
         self._chat_timeout = float(chat_timeout_sec)
         self._shuffle = bool(shuffle_tasks)
         self._task_idx = 0

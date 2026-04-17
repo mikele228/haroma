@@ -4,6 +4,16 @@ Optional wall-time tracing for HTTP /chat: spans from InputAgent through Persona
 Enable with POST ``{"trace_latency": true}`` or env ``HAROMA_CHAT_TRACE=1``.
 Response includes ``latency_trace``: ``{ "total_ms", "spans": [{ "phase", "ms" }] }``.
 
+**Dummy / probe mode:** with ``HAROMA_LLM_DUMMY_REPLY=1``, latency tracing is
+**turned on automatically** for each chat turn (same ``latency_trace`` payload)
+so you can measure end-to-end time without a second flag. Opt out with
+``HAROMA_LLM_DUMMY_NO_LATENCY_TRACE=1`` if you need a smaller JSON body.
+
+With ``HAROMA_LLM_DUMMY_REPLY``, packed-context ``generate_chat`` is skipped inside
+``LLMContextReasoner`` (synthetic reply); ``latency_trace`` may include
+``llm_context_latency_ms``, ``non_llm_wall_ms_approx``, and ``synthetic_llm`` when
+those fields apply.
+
 Console lines (``[ChatLatency]``) when POST ``trace_latency`` is true or env
 ``HAROMA_CHAT_TRACE_LOG=1``.
 """
@@ -31,6 +41,45 @@ def trace_log_requested() -> bool:
         "true",
         "yes",
     )
+
+
+def _synthetic_llm_probe_env() -> bool:
+    """True when packed LLM skips real decode (see ``engine/LLMContextReasoner``)."""
+    return str(os.environ.get("HAROMA_LLM_DUMMY_REPLY", "") or "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def packed_llm_dummy_reply_raw() -> str:
+    """Raw ``HAROMA_LLM_DUMMY_REPLY`` value seen by this process (debug launcher env)."""
+    return str(os.environ.get("HAROMA_LLM_DUMMY_REPLY", "") or "")
+
+
+def packed_llm_dummy_probe_active() -> bool:
+    """Same condition as ``engine/LLMContextReasoner`` — native ``generate_chat`` is skipped."""
+    return _synthetic_llm_probe_env()
+
+
+def dummy_reply_auto_latency_trace() -> bool:
+    """When True, InputAgent enables ``latency_trace`` without ``HAROMA_CHAT_TRACE``.
+
+    Used when ``HAROMA_LLM_DUMMY_REPLY`` is on so dummy mode is enough to read
+    ``latency_trace.total_ms`` in the HTTP JSON. Opt out with
+    ``HAROMA_LLM_DUMMY_NO_LATENCY_TRACE=1``.
+    """
+    if not _synthetic_llm_probe_env():
+        return False
+    if str(os.environ.get("HAROMA_LLM_DUMMY_NO_LATENCY_TRACE", "") or "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    ):
+        return False
+    return True
 
 
 def trace_enabled(slot: Optional[Dict[str, Any]]) -> bool:
@@ -100,6 +149,19 @@ def trace_attach_to_payload(
         "total_ms": total,
         "spans": list(slot.get("_trace_spans") or []),
     }
+    lc = payload.get("llm_context")
+    if isinstance(lc, dict) and lc.get("latency_ms") is not None:
+        try:
+            llm_ms = float(lc.get("latency_ms") or 0.0)
+            payload["latency_trace"]["llm_context_latency_ms"] = round(llm_ms, 2)
+            payload["latency_trace"]["non_llm_wall_ms_approx"] = round(
+                max(0.0, total - llm_ms),
+                2,
+            )
+        except (TypeError, ValueError):
+            pass
+    if _synthetic_llm_probe_env():
+        payload["latency_trace"]["synthetic_llm"] = True
     if _trace_log(slot):
         sp = payload["latency_trace"]["spans"]
         slow = sorted(sp, key=lambda x: -x.get("ms", 0.0))[:8]

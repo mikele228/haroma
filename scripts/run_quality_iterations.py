@@ -16,7 +16,7 @@ Typical full session (default T=100, R=5) takes tens of minutes — use
 Usage:
   cd HaromaX6
   python scripts/run_quality_iterations.py --turns 20 --runs 2
-  python scripts/run_quality_iterations.py --turns 20 --runs 2 --depth fast
+  python scripts/run_quality_iterations.py --turns 20 --runs 2
 
 Output:
   logs/quality_runs/run_XX.jsonl(.summary.json) and aggregate.summary.json
@@ -263,9 +263,9 @@ def main() -> None:
     p.add_argument("--runs", type=int, default=5)
     p.add_argument(
         "--depth",
-        choices=("fast", "normal"),
+        choices=("normal",),
         default="normal",
-        help="normal = full cognitive path; fast = latency-oriented shortcuts",
+        help="POST /chat depth",
     )
     p.add_argument(
         "--latency-target-sec",
@@ -419,7 +419,7 @@ def main() -> None:
     )
     print(
         "\nNote: Heuristic quality is not human judgment. Sub-second latency on every\n"
-        "turn may be infeasible on CPU with full models; use depth=fast and tune further.",
+        "turn may be infeasible on CPU with full models; tune timeouts and hardware.",
         flush=True,
     )
 

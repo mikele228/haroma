@@ -175,6 +175,7 @@ def test_status_includes_chat_async_fields(srv_mock):
     assert j0.get("chat_async_pending") == 0
     assert j0.get("chat_async_ttl_sec") == 60.0
     assert j0.get("http_chat_inflight") == 0
+    assert j0.get("input_pipeline_busy") is False
     assert j0.get("bg_training_defer_enabled") is True
     assert j0.get("bg_training_deferred") is False
 

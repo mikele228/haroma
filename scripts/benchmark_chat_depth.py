@@ -1,4 +1,4 @@
-"""Benchmark POST /chat latency: depth=fast vs depth=normal (same messages).
+"""Benchmark POST /chat latency (same messages, ``depth=normal``).
 
   python -u scripts/benchmark_chat_depth.py
   python -u scripts/benchmark_chat_depth.py --base http://127.0.0.1:8193 --rounds 10
@@ -120,7 +120,7 @@ def summarize(label: str, times: List[float]) -> None:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--base", default="http://127.0.0.1:8193")
-    ap.add_argument("--rounds", type=int, default=10, help="messages per depth")
+    ap.add_argument("--rounds", type=int, default=10, help="messages per run")
     ap.add_argument("--timeout", type=float, default=180.0)
     ap.add_argument("--status-timeout", type=float, default=15.0)
     ap.add_argument(
@@ -155,25 +155,13 @@ def main() -> int:
         time.sleep(bw)
 
     print(f"Base URL: {base}", flush=True)
-    print(
-        f"Messages per mode: {n} (same list for fast and normal)\n",
-        flush=True,
-    )
+    print(f"Messages: {n}\n", flush=True)
 
-    print("--- FAST ---", flush=True)
-    t_fast = run_block(base, "fast", messages, t_out)
-    print(flush=True)
-    print("--- NORMAL ---", flush=True)
+    print("--- /chat depth=normal ---", flush=True)
     t_norm = run_block(base, "normal", messages, t_out)
     print(flush=True)
 
-    summarize("FAST", t_fast)
-    print()
     summarize("NORMAL", t_norm)
-    print()
-    if t_fast and t_norm:
-        ratio = statistics.mean(t_norm) / max(statistics.mean(t_fast), 1e-6)
-        print(f"Ratio mean(normal/fast): {ratio:.2f}x", flush=True)
     return 0
 
 

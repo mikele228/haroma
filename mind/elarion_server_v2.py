@@ -32,12 +32,40 @@ Env ``HAROMA_CHAT_TIMEOUT`` (optional): seconds for HTTP ``/chat`` to wait on
 the cognitive slot. If unset, the wait is ``max(540, LLM_cap+120)`` (or
 ``600`` when LLM timeout is unlimited).
 
+Env ``HAROMA_CHAT_PIPELINE_LOG=1``: print ``[ChatPipeline]`` lines with a
+per-turn ``trace=`` id (see :mod:`mind.chat_pipeline_log`) so you can see the
+last stage reached before a stall. Use ``HAROMA_CHAT_PIPELINE_TIMING=1`` for
+``seg=…ms cum=…ms`` on each line (delta since previous stage, cumulative since
+first log), or set ``HAROMA_CHAT_PIPELINE_LOG=full`` for logs + timing together.
+
+``HAROMA_LLM_DUMMY_REPLY=1`` skips real ``generate_chat`` only inside packed-LLM
+inference; the full persona stack (including ``persona_neural_section`` / shared
+neural read lock and encoder) still runs — use that to measure **pipeline** latency
+without decode. ``HAROMA_LLM_DUMMY_FULL_PACK``
+controls whether :mod:`engine.LLMContextReasoner` runs the expensive ``build_messages``
+path while dummy (pack-size profiling).
+
+``HAROMA_CHAT_INPUT_PRIORITY`` (default ``1``): while the input pipeline is busy
+(HTTP ``/chat`` and/or InputAgent queues), defer non-critical persona/TrueSelf/background
+work so input completes first
+(see :mod:`mind.chat_priority`). Set to ``0`` to interleave as before.
+
+After each persona cognitive cycle, if the **input pipeline** is still busy (HTTP
+``/chat`` lifecycle and/or :class:`agents.input_agent.InputAgent` text/sensor
+queues), agents sleep ``HAROMA_POST_CYCLE_INPUT_BUSY_SLEEP_SEC`` (fallback:
+``HAROMA_POST_CYCLE_CHAT_BUSY_SLEEP_SEC``, default ``3``), up to
+``HAROMA_POST_CYCLE_INPUT_BUSY_MAX_RETRIES`` (fallback:
+``HAROMA_POST_CYCLE_CHAT_BUSY_MAX_RETRIES``, default ``1``; ``0`` = retry until
+idle). See :meth:`agents.persona_agent.PersonaAgent._yield_after_cycle_if_input_pipeline_busy`
+and :func:`mind.chat_priority.input_pipeline_busy`.
+
 Input latency: ``HAROMA_INPUT_TICK_INTERVAL_SEC`` overrides InputAgent tick
 (default in ``soul/agents.json`` / merged config is ~0.12s). User HTTP messages
-are queued with **priority** over other text. Legacy ``depth=fast`` in JSON is
-accepted but treated as full pipeline (same as ``normal``). Set
-``HAROMA_BG_DEFER_TRAINING_ON_HTTP_CHAT=0`` to keep background training during
-``/chat`` waits (more neural lock contention).
+are queued with **priority** over other text. Optional JSON ``depth`` is accepted for
+compatibility and normalized to ``normal``. Set
+``HAROMA_BG_DEFER_TRAINING_ON_INPUT_PIPELINE=0`` (or legacy
+``HAROMA_BG_DEFER_TRAINING_ON_HTTP_CHAT=0``) to keep background training while the
+input pipeline is active (more neural lock contention).
 
 Non-blocking chat: POST ``{"message": "...", "async": true}`` returns ``202`` with
 ``request_id``; poll ``GET /chat/result?id=<uuid>`` until ``status`` is absent
@@ -45,6 +73,12 @@ and the payload matches synchronous ``/chat``. Pending entries expire after
 ``HAROMA_CHAT_ASYNC_TTL_SEC`` (default ``900``). Single-process only.
 ``POST /robot/bridge/feedback`` merges on-robot executor results into
 ``agent_environment.extensions.robot_bridge`` (see :mod:`integrations.robot_http_bridge`).
+
+``POST /chat`` may include optional ``sensor_data`` (alias ``sensors``): an object whose
+keys are channel names (e.g. ``lidar``, ``gps``) and values are a reading or list of
+readings; they are merged into the same turn as ``message`` (see :mod:`agents.input_agent`).
+The cognitive path also receives ``senses_numpy``: per-modality ``float32`` arrays
+(empty if missing), including ``text_embedding``, from :mod:`mind.sense_numpy_bundle`.
 
 ``GET /status`` includes ``health`` (``process``, ``llm_ready``, ``last_agent_environment_received_at``,
 optional ``agent_environment_error``), ``embodiment_readiness`` (heuristic scores from
@@ -58,9 +92,9 @@ optional ``bg_training_defer_cap_sec``, ``web_learn`` (crawler snapshot), and
 counters for executor feedback POSTs), and optionally ``status_build_notes`` when a
 subsection could not be read.
 
-``HAROMA_BG_DEFER_TRAINING_CAP_SEC`` (optional): when set with defer-on-chat,
-background training still runs at least once per this many seconds even while
-HTTP chat is in flight.
+``HAROMA_BG_DEFER_TRAINING_CAP_SEC`` (optional): when set with defer-on-input-pipeline,
+background training still runs at least once per this many seconds even while the
+input pipeline is busy.
 
 ``HAROMA_WEB_LEARN_INJECT_MODE`` (``teaching_only`` | ``factual_heuristic`` | ``always``)
 and ``HAROMA_WEB_LEARN_INJECT_MAX`` tune injection of ``web_learn`` memories into recall
@@ -101,10 +135,18 @@ Env ``HAROMA_LLM_LOG_PACKED_STATS`` / ``HAROMA_LLM_DUMMY_REPLY`` /
 ``HAROMA_LLM_CHAT_ONLY`` / ``HAROMA_LLM_PROMPT_INFO`` (see
 ``engine/LLMContextReasoner``): log packed prompt size, skip inference with a
 probe reply, user-only chat, or attach ``prompt_info`` to the HTTP payload.
+Optional ``HAROMA_CHAT_TRACE=1`` or ``{"trace_latency": true}`` adds ``latency_trace``
+(see :mod:`agents.chat_latency`). With ``HAROMA_LLM_DUMMY_REPLY=1``, ``latency_trace``
+is attached automatically; set ``HAROMA_LLM_DUMMY_NO_LATENCY_TRACE=1`` to disable.
 
 Env ``HAROMA_LLM_WARMUP`` (default ``1``): after a local GGUF loads, run a
 short decode during boot so the first chat avoids cold-start latency. Set
 ``0`` to skip. ``HAROMA_LLM_WARMUP_MAX_TOKENS`` caps decode length (default ``24``).
+
+Local GGUF loads at **boot** by default (including Windows). Set ``HAROMA_LLM_LAZY_LOCAL=1``
+to defer loading until first chat if llama-cpp crashes during init. With lazy load,
+**background prefetch** (``HAROMA_LLM_LAZY_PREFETCH``, default ``1``) loads the model
+in a daemon thread after init so the first request is still faster than cold load on-path.
 """
 
 import math as _math
@@ -139,7 +181,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from sensors.domains import resolve_channel_to_domain
 
 from agents.boot_agent import BootAgent
-from agents.chat_latency import trace_requested
+from agents.input_agent import normalize_chat_inline_sensor_data
+from agents.chat_latency import (
+    packed_llm_dummy_probe_active,
+    packed_llm_dummy_reply_raw,
+    trace_requested,
+)
 from utils.coerce_bool import json_bool as _json_bool
 from mind.cognitive_contracts import (
     llm_context_timeout_seconds,
@@ -147,6 +194,7 @@ from mind.cognitive_contracts import (
 )
 from mind.symbolic_law_api import handle_laws_request
 from mind.chat_async_registry import ChatAsyncRegistry, truthy_async_flag
+from mind.chat_pipeline_log import log_chat_pipeline, pipeline_trace_end, trace_id_from_slot
 from mind.config_env import env_float
 from mind.http_chat_timeouts import http_chat_wait_sec as _http_chat_wait_sec
 from mind.http_server_guards import (
@@ -297,6 +345,9 @@ def _async_chat_resolve_ready(rid: str) -> Tuple[str, Any]:
     # Peek first (cheap, does not remove).
     ent = reg.get(rid)
     if ent is None:
+        cached = reg.get_completed(rid)
+        if cached is not None:
+            return ("complete", cached)
         return ("not_found", None)
     slot = ent["slot"]
     if not slot["event"].is_set():
@@ -304,6 +355,15 @@ def _async_chat_resolve_ready(rid: str) -> Tuple[str, Any]:
     # Atomically consume: only the winner proceeds with finalization.
     ent = reg.pop(rid)
     if ent is None:
+        # Lost a race with another GET: winner may not have called ``remember_completed`` yet.
+        cached = reg.get_completed(rid)
+        if cached is not None:
+            return ("complete", cached)
+        for _ in range(40):
+            time.sleep(0.003)
+            cached = reg.get_completed(rid)
+            if cached is not None:
+                return ("complete", cached)
         return ("not_found", None)
     result = normalize_http_chat_response(ent["slot"]["result"])
     if isinstance(result, dict):
@@ -322,6 +382,17 @@ def _async_chat_resolve_ready(rid: str) -> Tuple[str, Any]:
             ba.input_agent.log_response(result)
         except Exception as _le:
             print(f"[Server-v2] chat async finalize log_response error: {_le}", flush=True)
+    try:
+        reg.remember_completed(rid, result)
+    except Exception as _rc:
+        print(f"[Server-v2] chat async remember_completed error: {_rc}", flush=True)
+    _atid = trace_id_from_slot(ent.get("slot"))
+    log_chat_pipeline(
+        "http.async_slot_ready",
+        trace_id=_atid,
+        detail=f"rid={rid}",
+    )
+    pipeline_trace_end(_atid)
     return ("complete", result)
 
 
@@ -587,6 +658,11 @@ def chat():
         return _json_lab({"error": "empty message"}, 400)
     if len(message) > 4096:
         return _json_lab({"error": "message too long"}, 400)
+    _inline_sensors = normalize_chat_inline_sensor_data(
+        data.get("sensor_data")
+        if data.get("sensor_data") is not None
+        else data.get("sensors"),
+    )
     _raw_uid = data.get("user_id") if data.get("user_id") is not None else data.get("userId")
     _chat_user_id = sanitize_user_id(_raw_uid)
     _raw_dn = (
@@ -596,14 +672,11 @@ def chat():
     )
     _chat_display_name = str(_raw_dn).strip()[:160] if _raw_dn is not None and str(_raw_dn).strip() else None
 
-    # Legacy clients may send depth=fast; it is normalized to normal (no fast path).
     _default_depth = str(os.environ.get("HAROMA_CHAT_DEFAULT_DEPTH", "normal") or "normal").lower()
-    if _default_depth not in ("fast", "normal"):
+    if _default_depth != "normal":
         _default_depth = "normal"
     depth = str(data.get("depth") or _default_depth).lower()
-    if depth not in ("fast", "normal"):
-        depth = "normal"
-    if depth == "fast":
+    if depth != "normal":
         depth = "normal"
     debug_recall = _json_bool(data.get("debug_recall"), False)
     trace_latency = _json_bool(data.get("trace_latency"), False) or trace_requested()
@@ -632,6 +705,7 @@ def chat():
     input_agent = ba.input_agent
     _chat_begun = False
     _async_handoff = False
+    _pipeline_tid: Optional[str] = None
     _prev = message[:80] + ("…" if len(message) > 80 else "")
     print(
         f"[Server-v2] chat POST accepted depth={depth} chars={len(message)} preview={_prev!r}",
@@ -653,7 +727,11 @@ def chat():
             user_id=_chat_user_id,
             display_name=_chat_display_name,
             experiment_id=_exp_chat,
+            inline_sensor_data=_inline_sensors,
         )
+        _ptid = trace_id_from_slot(slot)
+        _pipeline_tid = _ptid
+        log_chat_pipeline("http.after_push_text", trace_id=_ptid)
         _after_push = time.time() - _chat_t0
         _push_note = "message queued; persona cycle runs async"
         print(
@@ -672,6 +750,11 @@ def chat():
             )
             _async_handoff = True
             print(f"[Server-v2] chat async handoff request_id={rid}", flush=True)
+            log_chat_pipeline(
+                "http.async_202",
+                trace_id=_ptid,
+                detail=f"request_id={rid}",
+            )
             return _json_lab(
                 {
                     "status": "pending",
@@ -683,7 +766,13 @@ def chat():
             )
 
         _chat_wait = _http_chat_wait_sec(depth)
+        log_chat_pipeline(
+            "http.sync_wait_start",
+            trace_id=_ptid,
+            detail=f"timeout_sec={_chat_wait}",
+        )
         if slot["event"].wait(timeout=_chat_wait):
+            log_chat_pipeline("http.sync_wait_done", trace_id=_ptid)
             result = normalize_http_chat_response(slot["result"])
             input_agent.log_response(result)
             print(
@@ -696,6 +785,11 @@ def chat():
             f"[Server-v2] chat client wait timed out ({_chat_wait}s) "
             f"after push_text={_after_push:.2f}s",
             flush=True,
+        )
+        log_chat_pipeline(
+            "http.sync_wait_timeout",
+            trace_id=_ptid,
+            detail=f"timeout_sec={_chat_wait}",
         )
         return _json_lab(
             {
@@ -714,6 +808,8 @@ def chat():
                 ba.shared.http_chat_end()
             except Exception as _he:
                 print(f"[Server-v2] http_chat_end error: {_he}", flush=True)
+        if not _async_handoff:
+            pipeline_trace_end(_pipeline_tid)
 
 
 @app.route("/chat/result", methods=["GET", "DELETE"])
@@ -786,6 +882,10 @@ def _chat_wait_sse_generator(rid: str, cap_sec: float, keepalive_sec: float):
             return
         ent = reg.get(rid)
         if ent is None:
+            code_mid, val_mid = _async_chat_resolve_ready(rid)
+            if code_mid == "complete":
+                yield f"data: {json.dumps(_safe(val_mid))}\n\n"
+                return
             yield f"data: {json.dumps(_safe({'error': 'unknown or expired request_id'}))}\n\n"
             return
         slot = ent.get("slot") or {}
@@ -1134,8 +1234,24 @@ def _kill_port(port: int) -> None:
         _kill_port_posix(port)
 
 
-def launch():
-    from mind.deploy_config import display_base_url, http_listen_host, http_listen_port
+def launch(debug: bool = False):
+    """Start the HTTP server. With ``debug=True``, Werkzeug blocks the main thread (no live robot UI).
+
+    With ``debug=False`` (default), the server runs in a daemon thread so the main thread can
+    host an optional Tk robot popup on Windows / macOS / X11 / Wayland, or ASCII status on stderr.
+
+    Loads ``.env`` from the project root (see :func:`mind.deploy_config.load_dotenv`) so variables
+    like ``HAROMA_LLM_DUMMY_REPLY`` apply when using ``python -m mind.elarion_server_v2`` as well
+    as ``python main.py``.
+    """
+    from mind.deploy_config import display_base_url, http_listen_host, http_listen_port, load_dotenv
+
+    _env_n = load_dotenv()
+    if _env_n:
+        print(
+            f"[Elarion-v2] Applied {_env_n} variable(s) from .env in project root",
+            flush=True,
+        )
 
     _bind_host = http_listen_host()
     _port = http_listen_port()
@@ -1147,6 +1263,10 @@ def launch():
     print("[Elarion-v2]  Architecture : Multi-Agent v6 (TrueSelf)", flush=True)
     print(f"[Elarion-v2]  Listen       : {_bind_host}:{_port}  (open: {_base})", flush=True)
     print(f"[Elarion-v2]  Web UI       : {_base}", flush=True)
+    print(
+        "[Elarion-v2]  (Browse that URL while this process runs — not the GitHub repo page.)",
+        flush=True,
+    )
     print(f"[Elarion-v2]  Chat API     : POST {_base}/chat", flush=True)
     print(f"[Elarion-v2]  Sensor       : POST {_base}/sensor", flush=True)
     print(
@@ -1187,6 +1307,13 @@ def launch():
         f"packed LLM cap (global): {_cap_s}",
         flush=True,
     )
+    _dr = packed_llm_dummy_reply_raw()
+    print(
+        "[Elarion-v2]  Packed LLM dummy: "
+        f"{'ON (native generate_chat skipped; pipeline only)' if packed_llm_dummy_probe_active() else 'OFF (native decode)'} "
+        f"| HAROMA_LLM_DUMMY_REPLY={_dr!r}",
+        flush=True,
+    )
     if configured_bearer_secret():
         ps = ", ".join(sorted(protected_path_set()))
         print(f"[Elarion-v2]  HTTP bearer   : ON (protected: {ps})", flush=True)
@@ -1210,18 +1337,41 @@ def launch():
         )
     if _env_truthy_flag("HAROMA_STRUCTURED_LOG"):
         print("[Elarion-v2]  Structured log: ON (stderr JSON per response, status+duration)", flush=True)
+    if debug:
+        print("[Elarion-v2]  Mode         : --debug (server on main thread; live robot head off)", flush=True)
     print("[Elarion-v2] -----------------------------------------", flush=True)
     # Avoid Flask's Click/colorama server banner — on some Windows consoles it
     # raises OSError (WinError 6: invalid handle) when writing to stdout.
     os.environ.setdefault("NO_COLOR", "1")
-    run_simple(
-        _bind_host,
-        _port,
-        app,
-        threaded=True,
-        use_reloader=False,
-        use_debugger=False,
-    )
+
+    def _run_http() -> None:
+        run_simple(
+            _bind_host,
+            _port,
+            app,
+            threaded=True,
+            use_reloader=False,
+            use_debugger=False,
+        )
+
+    if debug:
+        _run_http()
+        return
+
+    _http_thread = threading.Thread(target=_run_http, name="haroma-werkzeug", daemon=True)
+    _http_thread.start()
+
+    try:
+        from mind.live_robot_head import attach_live_robot_head
+
+        attach_live_robot_head(get_boot=_boot, debug=False)
+    except Exception as _lrh:
+        print(f"[Elarion-v2] Live robot head attach skipped: {_lrh}", flush=True)
+
+    try:
+        _http_thread.join()
+    except KeyboardInterrupt:
+        print("\n[Elarion-v2] Shutdown requested.", flush=True)
 
 
 if __name__ == "__main__":

@@ -1,21 +1,30 @@
 #!/usr/bin/env python3
 """
-Console chat with a small ASCII buddy that mirrors Elarion/Haroma affect + strategy.
+Optional **terminal** chat with a small ASCII buddy (POST /chat). The main chat UI is the
+**web app**: open ``http://127.0.0.1:8193/`` (or your ``HAROMA_URL``) in a browser — chat only;
+no separate desktop chat GUI is required.
 
-Uses POST /chat; displays ``affect``, human-readable ``strategy``, ``persona_name``,
-optional ``llm_context.latency_ms``, a mood trail, and wraps long replies to the
-terminal width. Shows a stderr spinner while the HTTP request is in flight.
+This script shows ``affect``, ``strategy``, ``persona_name``, optional ``llm_context.latency_ms``,
+a mood trail, and wraps replies. Spinner on stderr while waiting.
 
 Usage:
   python scripts/haroma_chat_buddy.py
   python scripts/haroma_chat_buddy.py --async-chat --width 100
-  python scripts/haroma_chat_buddy.py --ascii --no-spinner --no-color
+
+**Tk desktop window** is **off by default**. Use ``--gui`` or ``HAROMA_CHAT_BUDDY_GUI=1`` only
+if you explicitly want it; prefer the browser for normal chat.
+
+**ASCII vs Unicode** buddy art is auto-detected; override with ``--ascii`` / ``--unicode`` or
+``HAROMA_BUDDY_ASCII`` / ``HAROMA_BUDDY_UNICODE``.
 
 Slash commands: /help, /status, /quit
 
 Environment:
-  HAROMA_URL           Base URL (default http://127.0.0.1:8193)
-  HAROMA_HTTP_BEARER   Optional Authorization: Bearer …
+  HAROMA_URL               Base URL (default http://127.0.0.1:8193)
+  HAROMA_HTTP_BEARER       Optional Authorization: Bearer …
+  HAROMA_CHAT_BUDDY_GUI    1/true = opt-in Tk window (same as --gui)
+  HAROMA_BUDDY_ASCII       1 = force ASCII art
+  HAROMA_BUDDY_UNICODE     1 = force Unicode/box-drawing art
 """
 
 from __future__ import annotations
@@ -23,6 +32,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import queue
 import shutil
 import sys
 import textwrap
@@ -373,20 +383,319 @@ def chat_async_poll(
     return {"error": f"HTTP {code}", "body": data}
 
 
+def _env_wants_gui() -> bool:
+    return str(os.environ.get("HAROMA_CHAT_BUDDY_GUI", "") or "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _env_rejects_gui() -> bool:
+    return str(os.environ.get("HAROMA_CHAT_BUDDY_GUI", "") or "").strip().lower() in (
+        "0",
+        "false",
+        "no",
+        "off",
+        "console",
+        "tty",
+    )
+
+
+def _should_attempt_gui(args: argparse.Namespace) -> bool:
+    """True only when Tk is explicitly requested (--gui or HAROMA_CHAT_BUDDY_GUI=1)."""
+    if getattr(args, "no_gui", False):
+        return False
+    if _env_rejects_gui():
+        return False
+    return bool(args.gui) or _env_wants_gui()
+
+
+def _explicit_gui_required(args: argparse.Namespace) -> bool:
+    """If True and GUI fails, exit non-zero (no console fallback)."""
+    return bool(args.gui) or _env_wants_gui()
+
+
+def _terminal_prefers_ascii() -> bool:
+    """Heuristic: piped output and non-UTF-8 console encodings → safer ASCII art."""
+    if not sys.stdout.isatty():
+        return True
+    loc = str(os.environ.get("LC_ALL") or os.environ.get("LANG") or "")
+    if "utf-8" in loc.lower() or "utf8" in loc.lower():
+        return False
+    enc = (getattr(sys.stdout, "encoding", None) or "").lower()
+    if enc in ("utf-8", "utf8"):
+        return False
+    if enc in ("ascii", "cp437", "cp1252", "latin-1", "iso8859-1", "iso-8859-1"):
+        return True
+    return "utf" not in enc
+
+
+def _effective_ascii(args: argparse.Namespace) -> bool:
+    if getattr(args, "unicode", False):
+        return False
+    if args.ascii:
+        return True
+    if str(os.environ.get("HAROMA_BUDDY_ASCII", "") or "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    ):
+        return True
+    if str(os.environ.get("HAROMA_BUDDY_UNICODE", "") or "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    ):
+        return False
+    return _terminal_prefers_ascii()
+
+
+def run_gui(args: argparse.Namespace, *, quiet_fail: bool = False) -> int:
+    """Small Tk window: buddy panel + transcript + input (non-blocking HTTP in a thread)."""
+    try:
+        import tkinter as tk
+        from tkinter import scrolledtext, ttk
+    except ImportError as e:
+        if not quiet_fail:
+            print(
+                "tkinter is not available (install python3-tk on Debian/Ubuntu, or use Tcl/Tk on macOS).",
+                file=sys.stderr,
+            )
+            print(f"  ({e})", file=sys.stderr)
+        return 1
+
+    base = (args.url or _base_url()).rstrip("/")
+    use_color = False
+    ascii_only = _effective_ascii(args)
+    frame = [0]
+    emotion_history: List[str] = []
+
+    try:
+        root = tk.Tk()
+    except tk.TclError as e:
+        if not quiet_fail:
+            print(
+                "Cannot open a Tk window (no display?). Use a desktop session, "
+                "SSH -X, or run with --no-gui for terminal-only mode.",
+                file=sys.stderr,
+            )
+            print(f"  ({e})", file=sys.stderr)
+        return 1
+
+    root.title(f"Haroma buddy — {base}")
+    root.minsize(520, 480)
+
+    status = ttk.Label(root, text="Checking server…")
+    status.pack(fill=tk.X, padx=8, pady=4)
+
+    ok, ping_msg, ping_ms = ping_server(base)
+    if ok:
+        status.config(text=f"Server OK ({ping_ms:.0f} ms /status)")
+    else:
+        status.config(text=f"Server not reachable: {ping_msg}")
+
+    buddy_frm = ttk.LabelFrame(root, text="Buddy")
+    buddy_frm.pack(fill=tk.BOTH, expand=False, padx=8, pady=4)
+    mono = ("Consolas", "DejaVu Sans Mono", "Courier New", "monospace")
+    buddy_txt = tk.Text(
+        buddy_frm,
+        height=14,
+        width=44,
+        font=(mono[0], 10),
+        state=tk.DISABLED,
+        wrap=tk.NONE,
+    )
+    buddy_txt.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+
+    log = scrolledtext.ScrolledText(root, height=12, wrap=tk.WORD, font=("Segoe UI", 10))
+    log.pack(fill=tk.BOTH, expand=True, padx=8, pady=4)
+    log.insert(tk.END, "Type a message and press Send. /help /status /quit\n\n")
+    log.config(state=tk.DISABLED)
+
+    ent_frm = ttk.Frame(root)
+    ent_frm.pack(fill=tk.X, padx=8, pady=(0, 8))
+    entry = ttk.Entry(ent_frm)
+    entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
+    send_btn = ttk.Button(ent_frm, text="Send")
+    send_btn.pack(side=tk.RIGHT)
+
+    result_q: queue.Queue = queue.Queue()
+    busy = [False]
+
+    def _append_log(s: str) -> None:
+        log.config(state=tk.NORMAL)
+        log.insert(tk.END, s)
+        log.see(tk.END)
+        log.config(state=tk.DISABLED)
+
+    def _set_buddy_art(text: str) -> None:
+        buddy_txt.config(state=tk.NORMAL)
+        buddy_txt.delete("1.0", tk.END)
+        buddy_txt.insert(tk.END, text)
+        buddy_txt.config(state=tk.DISABLED)
+
+    def _apply_response(data: Dict[str, Any]) -> None:
+        if data.get("error"):
+            _append_log(f"[error] {data.get('error')}\n")
+            if data.get("body") is not None:
+                _append_log(json.dumps(data.get("body"), indent=2)[:1200] + "\n")
+            return
+        affect = data.get("affect") if isinstance(data.get("affect"), dict) else {}
+        strategy = str(data.get("strategy") or "")
+        cycle = data.get("cycle", "—")
+        reply = str(data.get("response") or "").strip()
+        dom = str(affect.get("dominant_emotion") or "neutral")
+        emotion_history.append(dom)
+        if len(emotion_history) > 32:
+            emotion_history[:] = emotion_history[-32:]
+        persona_name = str(
+            data.get("persona_name") or data.get("persona") or ""
+        ).strip()
+        llm_ctx = data.get("llm_context") if isinstance(data.get("llm_context"), dict) else {}
+        lat = 0.0
+        try:
+            lat = float(llm_ctx.get("latency_ms") or 0.0)
+        except (TypeError, ValueError):
+            pass
+        frame[0] += 1
+        art = render_buddy(
+            affect,
+            strategy,
+            cycle,
+            frame=frame[0],
+            use_color=use_color,
+            ascii_only=ascii_only,
+            persona_name=persona_name,
+            emotion_history=emotion_history,
+            llm_latency_ms=lat,
+        )
+        _set_buddy_art(art)
+        term_w = max(40, min(100, root.winfo_screenwidth() // 8 or 72))
+        _append_log("\nElarion:\n" + _wrap_reply(reply, term_w) + "\n\n")
+
+    def _worker(line: str) -> None:
+        try:
+            if args.async_chat:
+                data = chat_async_poll(base, line, depth=args.depth)
+            else:
+                data = chat_sync(base, line, depth=args.depth)
+            result_q.put(("chat", data))
+        except Exception as e:
+            result_q.put(("err", str(e)))
+
+    def _send() -> None:
+        if busy[0]:
+            return
+        line = entry.get().strip()
+        if not line:
+            return
+        low = line.lower()
+        if low in ("/q", "/quit", "/exit"):
+            root.destroy()
+            return
+        if low == "/help":
+            _append_log(
+                "  /help /quit  ·  Server must be running.\n"
+                "  Use --async-chat if first reply is very slow on CPU.\n\n"
+            )
+            entry.delete(0, tk.END)
+            return
+        if low == "/status":
+            ok2, msg, ms = ping_server(base)
+            _append_log(f"  /status: {'ok' if ok2 else msg} ({ms:.0f} ms)\n\n")
+            entry.delete(0, tk.END)
+            return
+
+        entry.delete(0, tk.END)
+        _append_log(f"You: {line}\n")
+        busy[0] = True
+        send_btn.config(state=tk.DISABLED)
+        status.config(text="Waiting for Elarion…")
+        threading.Thread(target=_worker, args=(line,), daemon=True).start()
+
+    def _poll_queue() -> None:
+        try:
+            while True:
+                kind, payload = result_q.get_nowait()
+                if kind == "err":
+                    _append_log(f"[error] {payload}\n\n")
+                elif kind == "chat":
+                    _apply_response(payload if isinstance(payload, dict) else {})
+                busy[0] = False
+                send_btn.config(state=tk.NORMAL)
+                ok3, _, ms3 = ping_server(base, timeout=3.0)
+                status.config(
+                    text=f"Ready ({ms3:.0f} ms /status)" if ok3 else "Server issue"
+                )
+        except queue.Empty:
+            pass
+        root.after(120, _poll_queue)
+
+    send_btn.config(command=_send)
+    entry.bind("<Return>", lambda e: _send())
+    root.after(100, _poll_queue)
+
+    def _on_close() -> None:
+        root.destroy()
+
+    root.protocol("WM_DELETE_WINDOW", _on_close)
+    entry.focus_set()
+    root.mainloop()
+    return 0
+
+
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Console chat + ASCII Haroma buddy (needs Elarion server).")
+    ap = argparse.ArgumentParser(
+        description="Optional terminal chat buddy. Main UI is the web app at the server URL (browser)."
+    )
     ap.add_argument("--url", default=None, help="Base URL (default HAROMA_URL or http://127.0.0.1:8193)")
+    ap.add_argument(
+        "--gui",
+        action="store_true",
+        help="Open optional Tk window (default: off; use the web chatbox in a browser instead)",
+    )
+    ap.add_argument(
+        "--no-gui",
+        action="store_true",
+        help="Never open Tk (default). Use if HAROMA_CHAT_BUDDY_GUI=1 is set but you want terminal only",
+    )
     ap.add_argument("--async-chat", action="store_true", help="Use async /chat + poll (for long LLM loads)")
     ap.add_argument("--no-color", action="store_true", help="Disable ANSI colors")
-    ap.add_argument("--ascii", action="store_true", help="ASCII-only art (limited Unicode consoles)")
+    art = ap.add_mutually_exclusive_group()
+    art.add_argument(
+        "--ascii",
+        action="store_true",
+        help="Force ASCII-only buddy art (overrides auto-detect)",
+    )
+    art.add_argument(
+        "--unicode",
+        action="store_true",
+        help="Force Unicode/box-drawing buddy art (overrides auto-detect)",
+    )
     ap.add_argument("--no-spinner", action="store_true", help="Disable waiting spinner on stderr")
     ap.add_argument("--width", type=int, default=0, help="Wrap reply text (0 = terminal width)")
     ap.add_argument("--depth", default="normal", choices=("normal",), help="Chat depth (same as HTTP API)")
     args = ap.parse_args()
 
+    if _should_attempt_gui(args):
+        rc = run_gui(args, quiet_fail=not _explicit_gui_required(args))
+        if rc == 0:
+            return 0
+        if _explicit_gui_required(args):
+            return rc
+        print(
+            "[haroma_chat_buddy] Tk GUI unavailable — using terminal buddy.",
+            file=sys.stderr,
+            flush=True,
+        )
+
     base = (args.url or _base_url()).rstrip("/")
     use_color = sys.stdout.isatty() and not args.no_color
-    ascii_only = bool(args.ascii)
+    ascii_only = _effective_ascii(args)
     frame = 0
     emotion_history: List[str] = []
 
@@ -395,6 +704,10 @@ def main() -> int:
 
     print(
         _ansi("1;35", "Haroma console buddy — messages, /help, empty line or Ctrl+C to quit.", use_color),
+        flush=True,
+    )
+    print(
+        _ansi("90", f"Web chat UI (browser): {base}/", use_color),
         flush=True,
     )
     ok, ping_msg, ping_ms = ping_server(base)

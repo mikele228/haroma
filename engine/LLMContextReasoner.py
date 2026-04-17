@@ -21,8 +21,32 @@ Env (debug / probe)
   log one line with UTF-8 byte size, character count, rough token estimate
   (chars/4), and per-role character counts.
 * ``HAROMA_LLM_DUMMY_REPLY`` (``1``/``true``): skip ``generate_chat`` and
-  return a probe answer with the same stats — use to verify HTTP/cognitive
-  path is not blocked before the model call.
+  return immediately (default user-visible text ``Testing reply``). Chat JSON
+  includes ``latency_trace`` automatically (see :mod:`agents.chat_latency`);
+  set ``HAROMA_LLM_DUMMY_NO_LATENCY_TRACE=1`` to omit it. If the env
+  is unset but the backend is missing or not ``available``, the same synthetic
+  reply is used (``source=dummy_probe``) — there is no empty ``llm_unavailable``
+  result from this module.
+  For packed (non-``HAROMA_LLM_CHAT_ONLY``) prompts the reply is built as **JSON**
+  in the same shape the model is asked for, then parsed with ``parse_response``
+  so ``raw_json`` / fields match a real LLM pass. ``HAROMA_LLM_CHAT_ONLY`` keeps
+  a plain-text ``answer`` like the real chat-only path (no JSON layer).
+* ``HAROMA_LLM_DUMMY_REPLY_TEXT``: override dummy answer (default ``Testing reply``).
+* ``HAROMA_LLM_DUMMY_REPLY_VERBOSE`` (``1``/``true``): put full packed-stats probe
+  string in the JSON ``answer`` field (legacy long probe text) instead of the
+  short dummy string.
+* ``HAROMA_LLM_DUMMY_REPLY_JSON``: optional raw JSON string (single object). When
+  set, it is parsed with ``parse_response`` instead of the built-in synthetic
+  object (still tagged ``dummy_probe``). Invalid JSON falls back to the built-in
+  synthetic JSON.
+* ``HAROMA_LLM_DUMMY_FULL_PACK`` (``1``/``true``): on synthetic paths (env dummy
+  or no backend), run the full ``build_messages`` path (slow if recall/KG is huge).
+  **Default:** skip full packing and use a tiny placeholder prompt (faster *inside
+  this module only*).
+  **Pipeline profiling:** dummy skips only ``generate_chat`` here; PersonaAgent still
+  runs perception, ``neural_sync``, recall, etc., so HTTP latency reflects the real
+  pipeline minus native decode. Use unset ``FULL_PACK`` to isolate non-pack work, or
+  set it to measure packed prompt build cost.
 * ``HAROMA_LLM_CHAT_ONLY`` (``1``/``true``): send only the user line as a
   single user message (no soul, recall, KG, or JSON schema). The model reply
   is treated as plain text (not JSON). For JSON-style packed chat, leave
@@ -35,6 +59,10 @@ Env (debug / probe)
   fences before parsing.
 * ``HAROMA_LLM_JSON_ANSWER_KEY`` (default ``answer``): JSON field used as the
   user-visible reply text after parsing.
+* ``HAROMA_LLM_FALLBACK_WALL_SEC`` (default ``300``): if both the context timeout
+  and ``HAROMA_LLM_MAX_GENERATE_SEC`` are set to unlimited, this ceiling is applied
+  so native ``llama-cpp`` is never invoked without a wall-clock bound (which would
+  freeze the chat thread indefinitely).
 """
 
 from __future__ import annotations
@@ -119,8 +147,9 @@ def _prompt_info_payload(
     }
 
 
-def _should_include_prompt_info(chat_only: bool, dummy: bool) -> bool:
-    return _env_truthy("HAROMA_LLM_PROMPT_INFO") or chat_only or dummy
+def _should_include_prompt_info(chat_only: bool, synthetic: bool) -> bool:
+    """*synthetic* = env dummy or no-backend fallback (same short path as dummy)."""
+    return _env_truthy("HAROMA_LLM_PROMPT_INFO") or chat_only or synthetic
 
 
 def _llm_context_timeout_seconds() -> Optional[float]:
@@ -865,6 +894,59 @@ def parse_response(raw: Optional[str]) -> "LLMContextResult":
     )
 
 
+class _DummyLLMBackendPlaceholder:
+    """Stand-in when ``HAROMA_LLM_DUMMY_REPLY=1`` but no real GGUF/backend (prompt_info only)."""
+
+    available = True
+    _n_ctx = None
+
+
+def _dummy_probe_result(
+    *,
+    answer_text: str,
+    latency_ms: float,
+    prompt_info: Optional[Dict[str, Any]],
+    chat_only: bool,
+) -> LLMContextResult:
+    """Synthetic reply matching the real LLM path: JSON parse for packed prompts."""
+    if chat_only:
+        return LLMContextResult(
+            answer=answer_text if answer_text.strip() else None,
+            confidence=0.55,
+            reasoning_steps=[],
+            requires_confirmation=True,
+            source="dummy_probe",
+            latency_ms=latency_ms,
+            prompt_info=prompt_info,
+        )
+    _override = str(os.environ.get("HAROMA_LLM_DUMMY_REPLY_JSON") or "").strip()
+    if _override:
+        _parsed = parse_response(_override)
+        if _parsed.source != "json_parse_failed" and (
+            _parsed.has_answer or (_parsed.raw_json is not None)
+        ):
+            _parsed.source = "dummy_probe"
+            _parsed.latency_ms = latency_ms
+            _parsed.prompt_info = prompt_info
+            return _parsed
+    ak = _json_answer_key()
+    _obj: Dict[str, Any] = {
+        ak: answer_text,
+        "confidence": 1.0,
+        "reasoning_steps": ["dummy_probe: skipped generate_chat (synthetic JSON)"],
+        "requires_confirmation": False,
+        "inferences": [],
+        "cited_memories": [],
+        "env_updates": {},
+    }
+    _raw = json.dumps(_obj, ensure_ascii=False)
+    _result = parse_response(_raw)
+    _result.source = "dummy_probe"
+    _result.latency_ms = latency_ms
+    _result.prompt_info = prompt_info
+    return _result
+
+
 # ------------------------------------------------------------------
 # Result container
 # ------------------------------------------------------------------
@@ -987,11 +1069,14 @@ def run_llm_context_reasoning(
 ) -> LLMContextResult:
     """End-to-end: pack context → LLM call → parse JSON → result.
 
-    Safe to call even when the LLM backend is ``None`` or unavailable;
-    returns an empty result in that case.
+    When the backend is missing or not ``available``, returns the same synthetic
+    reply as ``HAROMA_LLM_DUMMY_REPLY`` (``source=dummy_probe``) so callers always
+    get a user-visible string unless ``generate_chat`` runs successfully.
     """
-    if llm_backend is None or not getattr(llm_backend, "available", False):
-        return LLMContextResult.empty("llm_unavailable")
+    _dummy = _env_truthy("HAROMA_LLM_DUMMY_REPLY")
+    _bk_ok = llm_backend is not None and getattr(llm_backend, "available", False)
+    _use_synthetic = _dummy or not _bk_ok
+    _effective_backend = llm_backend if _bk_ok else _DummyLLMBackendPlaceholder()
 
     _mt = max_tokens
     if _mt is None:
@@ -1009,6 +1094,14 @@ def run_llm_context_reasoning(
         print(
             "[LLMContextReasoner] HAROMA_LLM_CHAT_ONLY=1 — single user message, "
             "no packed soul/recall/KG (plain text reply, not JSON).",
+            flush=True,
+        )
+    elif _use_synthetic and not _env_truthy("HAROMA_LLM_DUMMY_FULL_PACK"):
+        _ut = (user_text or "").strip() or "."
+        messages = [{"role": "user", "content": _ut}]
+        print(
+            "[LLMContextReasoner] synthetic reply path — skipping full "
+            "build_messages (set HAROMA_LLM_DUMMY_FULL_PACK=1 for full pack timing).",
             flush=True,
         )
     else:
@@ -1031,35 +1124,56 @@ def run_llm_context_reasoning(
         )
     _pack_stats = packed_messages_stats(messages)
     _log_stats = _env_truthy("HAROMA_LLM_LOG_PACKED_STATS")
-    _dummy = _env_truthy("HAROMA_LLM_DUMMY_REPLY")
-    _n_ctx = getattr(llm_backend, "_n_ctx", None)
-    _include_pi = _should_include_prompt_info(_chat_only, _dummy)
+    _n_ctx = getattr(_effective_backend, "_n_ctx", None)
+    _include_pi = _should_include_prompt_info(_chat_only, _use_synthetic)
     _pi = (
-        _prompt_info_payload(_pack_stats, llm_backend, chat_only=_chat_only)
+        _prompt_info_payload(_pack_stats, _effective_backend, chat_only=_chat_only)
         if _include_pi
         else None
     )
-    if _log_stats or _dummy or _chat_only:
+    if _log_stats or _use_synthetic or _chat_only:
         _log_packed_stats(_pack_stats, n_ctx=_n_ctx)
 
-    if _dummy:
+    if _use_synthetic:
         _ms = round((time.perf_counter() - _t_pack0) * 1000, 2)
-        _msg = (
-            "[dummy LLM probe] Skipped generate_chat. "
-            f"Packed prompt: {_pack_stats['total_chars']} chars, "
-            f"{_pack_stats['total_utf8_bytes']} UTF-8 bytes, "
-            f"~{_pack_stats['est_tokens_approx']} est. tokens (chars/4), "
-            f"{_pack_stats['message_count']} messages, "
-            f"chars_by_role={_pack_stats['chars_by_role']!r}."
-        )
-        return LLMContextResult(
-            answer=_msg,
-            confidence=1.0,
-            reasoning_steps=["dummy_probe: no local inference"],
-            requires_confirmation=False,
-            source="dummy_probe",
+        _verbose = _env_truthy("HAROMA_LLM_DUMMY_REPLY_VERBOSE")
+        if _verbose:
+            _msg = (
+                "[dummy LLM probe] Skipped generate_chat. "
+                f"Packed prompt: {_pack_stats['total_chars']} chars, "
+                f"{_pack_stats['total_utf8_bytes']} UTF-8 bytes, "
+                f"~{_pack_stats['est_tokens_approx']} est. tokens (chars/4), "
+                f"{_pack_stats['message_count']} messages, "
+                f"chars_by_role={_pack_stats['chars_by_role']!r}."
+            )
+        else:
+            _msg = (os.environ.get("HAROMA_LLM_DUMMY_REPLY_TEXT") or "Testing reply").strip()
+            if not _msg:
+                _msg = "Testing reply"
+        if not _verbose and not _chat_only:
+            _why = (
+                "HAROMA_LLM_DUMMY_REPLY=1"
+                if _dummy
+                else "no LLM backend"
+            )
+            print(
+                f"[LLMContextReasoner] {_why} — skipped generate_chat; "
+                f"synthetic JSON answer={_msg!r} | packed {_pack_stats['total_chars']} chars "
+                f"~{_pack_stats['est_tokens_approx']} est. tok | pack+probe {_ms:.1f}ms. "
+                "Set HAROMA_LLM_DUMMY_REPLY_VERBOSE=1 for long stats in answer field.",
+                flush=True,
+            )
+        elif not _verbose and _chat_only:
+            print(
+                "[LLMContextReasoner] synthetic + CHAT_ONLY — plain answer "
+                f"={_msg!r} | pack+probe {_ms:.1f}ms.",
+                flush=True,
+            )
+        return _dummy_probe_result(
+            answer_text=_msg,
             latency_ms=_ms,
             prompt_info=_pi,
+            chat_only=_chat_only,
         )
 
     t0 = time.perf_counter()
@@ -1067,9 +1181,24 @@ def run_llm_context_reasoning(
     _exec_tlim = _tlim
     if _exec_tlim is None:
         _exec_tlim = _unbounded_generate_cap_seconds()
+    if _exec_tlim is None:
+        # Both HAROMA_LLM_CONTEXT_TIMEOUT_SEC and HAROMA_LLM_MAX_GENERATE_SEC were set
+        # to unlimited — never call native llama-cpp synchronously (can hang forever).
+        try:
+            _fb = float(os.environ.get("HAROMA_LLM_FALLBACK_WALL_SEC", "300") or "300")
+        except (TypeError, ValueError):
+            _fb = 300.0
+        _exec_tlim = min(7200.0, max(30.0, _fb))
+        print(
+            "[LLMContextReasoner] LLM wall time was unlimited — using "
+            f"HAROMA_LLM_FALLBACK_WALL_SEC={_exec_tlim:.0f}s so the HTTP thread cannot "
+            "hang forever in native decode. Set finite HAROMA_LLM_CONTEXT_TIMEOUT_SEC / "
+            "HAROMA_LLM_MAX_GENERATE_SEC to control this explicitly.",
+            flush=True,
+        )
 
     def _do_generate():
-        return llm_backend.generate_chat(
+        return _effective_backend.generate_chat(
             messages,
             max_tokens=_mt,
             temperature=temperature,
@@ -1077,36 +1206,30 @@ def run_llm_context_reasoning(
 
     raw = None
     try:
-        if _exec_tlim is not None:
+        print(
+            f"[LLMContextReasoner] generate_chat (timeout={_exec_tlim:.0f}s)…",
+            flush=True,
+        )
+        pool = ThreadPoolExecutor(max_workers=1)
+        try:
+            fut = pool.submit(_do_generate)
+            raw = fut.result(timeout=_exec_tlim)
+        except FutureTimeout:
+            elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
             print(
-                f"[LLMContextReasoner] generate_chat (timeout={_exec_tlim:.0f}s)…",
+                f"[LLMContextReasoner] generate_chat timed out after "
+                f"{elapsed_ms:.0f}ms (limit {_exec_tlim:.0f}s); continuing without "
+                f"LLM answer. Native decode may still run in the worker — if the next "
+                f"chat hangs, restart the process. Raise HAROMA_LLM_CONTEXT_TIMEOUT_SEC "
+                f"or cap as needed.",
                 flush=True,
             )
-            pool = ThreadPoolExecutor(max_workers=1)
-            try:
-                fut = pool.submit(_do_generate)
-                raw = fut.result(timeout=_exec_tlim)
-            except FutureTimeout:
-                elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
-                print(
-                    f"[LLMContextReasoner] generate_chat timed out after "
-                    f"{elapsed_ms:.0f}ms (limit {_exec_tlim:.0f}s); continuing without "
-                    f"LLM answer. Raise HAROMA_LLM_CONTEXT_TIMEOUT_SEC or "
-                    f"HAROMA_LLM_MAX_GENERATE_SEC if loads are legitimately slow.",
-                    flush=True,
-                )
-                result = LLMContextResult.empty("llm_timeout")
-                result.latency_ms = elapsed_ms
-                result.prompt_info = _pi
-                return result
-            finally:
-                pool.shutdown(wait=False, cancel_futures=True)
-        else:
-            print(
-                "[LLMContextReasoner] generate_chat (no timeout — native decode can hang)…",
-                flush=True,
-            )
-            raw = _do_generate()
+            result = LLMContextResult.empty("llm_timeout")
+            result.latency_ms = elapsed_ms
+            result.prompt_info = _pi
+            return result
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
     except Exception as exc:
         elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
         print(
