@@ -48,8 +48,8 @@ _CF_DEBUG = os.environ.get("ELARION_CYCLE_FLOW_DEBUG", "0") == "1"
 
 # PersonaAgent neural read lock slices (see agents/persona_agent): embed/perception,
 # then gate/backbone/self-model/discourse — then recall+ pipeline without neural lock.
-# Single-message mid-cycle checkpoint/resume across ticks is intentionally out of scope;
-# use short slices + off-lock phases + optional HAROMA_BG_MAX_TRAIN_MODULES_PER_TICK instead.
+# Multi-tick phased *groups* (generator yields) — see :mod:`mind.cognitive_loop_groups`
+# and ``HAROMA_PERSONA_PHASED_CYCLE``. Legacy neural slice names:
 PERSONA_NEURAL_PHASES = (
     "neural_embed_perception",
     "neural_gate_discourse",

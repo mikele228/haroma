@@ -31,16 +31,19 @@ from agents.persona_agent import PersonaAgent
 from agents.message_bus import Message, MessageBus
 from mind.cognitive_observability import append_cognitive_trace_to_payload, log_cognitive_trace
 from mind.chat_priority import chat_input_priority_defer_non_user, input_pipeline_busy
+from mind.persona_http_yield import http_chat_inflight_positive
 from mind.chat_pipeline_log import (
-    chat_pipeline_log_enabled,
-    log_chat_pipeline,
+    input_pipeline_log_enabled,
+    log_input_pipeline,
     trace_id_from_message,
     trace_id_from_slot,
 )
 from mind.trueself_input_priority import (
     is_sensor_pulse_no_chat_text,
     partition_trueself_input_for_tick,
+    prioritize_trueself_input_messages,
 )
+from mind.cognitive_loop_groups import cognitive_phases_enabled
 
 if TYPE_CHECKING:
     from agents.shared_resources import SharedResources
@@ -116,11 +119,11 @@ class TrueSelfAgent(PersonaAgent):
                 self._exec_lock.release()
                 if (
                     wait_trace_id
-                    and chat_pipeline_log_enabled()
+                    and input_pipeline_log_enabled()
                     and spin_i > 0
                     and spin_i % 50 == 0
                 ):
-                    log_chat_pipeline(
+                    log_input_pipeline(
                         "trueself.waiting_packed_llm_io",
                         trace_id=wait_trace_id,
                         detail=f"blocked_s={time.perf_counter() - t_spin:.1f}",
@@ -133,6 +136,8 @@ class TrueSelfAgent(PersonaAgent):
     # -- tick (overrides PersonaAgent._tick) --------------------------------
 
     def _tick(self):
+        self._drain_persona_merge_queue()
+        self._advance_cognitive_phases_on_tick()
         messages = self.poll()
 
         input_msgs = []
@@ -155,18 +160,20 @@ class TrueSelfAgent(PersonaAgent):
             other_msgs = []
 
         deferred_sensor: List[Message] = []
+        if input_msgs:
+            input_msgs = prioritize_trueself_input_messages(input_msgs)
         if len(input_msgs) > 1:
             _order_before = [trace_id_from_message(m) for m in input_msgs]
             input_msgs, deferred_sensor = partition_trueself_input_for_tick(input_msgs)
             _order_full = [trace_id_from_message(m) for m in input_msgs + deferred_sensor]
-            if chat_pipeline_log_enabled() and _order_before != _order_full:
-                log_chat_pipeline(
+            if input_pipeline_log_enabled() and _order_before != _order_full:
+                log_input_pipeline(
                     "trueself.input_reordered_http_first",
                     trace_id=_order_full[0] if _order_full else None,
                     detail=f"n={len(_order_full)} before={_order_before} after={_order_full}",
                 )
-            if deferred_sensor and chat_pipeline_log_enabled():
-                log_chat_pipeline(
+            if deferred_sensor and input_pipeline_log_enabled():
+                log_input_pipeline(
                     "trueself.input_defer_sensor_backlog",
                     trace_id=trace_id_from_message(input_msgs[0]) if input_msgs else None,
                     detail=f"process_now={len(input_msgs)} requeued={len(deferred_sensor)}",
@@ -175,9 +182,9 @@ class TrueSelfAgent(PersonaAgent):
                 for m in deferred_sensor:
                     self.bus.send_direct(self.agent_id, m)
 
-        if chat_pipeline_log_enabled() and input_msgs:
+        if input_pipeline_log_enabled() and input_msgs:
             _its = [trace_id_from_message(m) for m in input_msgs]
-            log_chat_pipeline(
+            log_input_pipeline(
                 "trueself.tick_input_batch",
                 trace_id=_its[0] if _its else None,
                 detail=f"n={len(input_msgs)} traces={_its}",
@@ -188,7 +195,7 @@ class TrueSelfAgent(PersonaAgent):
             # Handling input here blocks in ``_handle_input`` → ``_acquire_exec_when_llm_idle``
             # until packed LLM finishes, then runs the user turn next.
             for msg in relay_msgs + other_msgs:
-                log_chat_pipeline(
+                log_input_pipeline(
                     "trueself.tick_requeue_during_llm_io",
                     trace_id=trace_id_from_message(msg),
                     detail=msg.channel,
@@ -224,7 +231,7 @@ class TrueSelfAgent(PersonaAgent):
         """Delegate to a specialist persona or process on TrueSelf."""
         slot = msg.response_slot
         _tid = trace_id_from_message(msg)
-        log_chat_pipeline("trueself.handle_input_before_exec_lock", trace_id=_tid)
+        log_input_pipeline("trueself.handle_input_before_exec_lock", trace_id=_tid)
         chat_latency.trace_span(slot, "trueself_mailbox_dequeued")
         if self._llm_io_in_progress and _tid:
             print(
@@ -236,7 +243,7 @@ class TrueSelfAgent(PersonaAgent):
             )
         self._acquire_exec_when_llm_idle(wait_trace_id=_tid)
         try:
-            log_chat_pipeline("trueself.handle_input_exec_lock_acquired", trace_id=_tid)
+            log_input_pipeline("trueself.handle_input_exec_lock_acquired", trace_id=_tid)
             chat_latency.trace_span(slot, "trueself_exec_lock_acquired")
             self._handle_input_inner(msg)
         finally:
@@ -245,13 +252,28 @@ class TrueSelfAgent(PersonaAgent):
     def _handle_input_inner(self, msg: Message):
         slot = msg.response_slot
         _tid = trace_id_from_message(msg)
-        log_chat_pipeline("trueself.input_inner_start", trace_id=_tid)
+        log_input_pipeline("trueself.input_inner_start", trace_id=_tid)
         chat_latency.trace_span(slot, "trueself_input_inner_start")
+        # Do not run a long TrueSelf cycle on untraced input while an HTTP /chat is in flight;
+        # traced user turns would wait behind this message in the same exec lock.
+        if http_chat_inflight_positive(self.shared) and _tid is None:
+            _c = msg.content if isinstance(msg.content, dict) else {}
+            _src = str(_c.get("source") or "").lower()
+            _txt = str(_c.get("text") or "").strip()
+            _plain_user_line = _src == "user" and bool(_txt)
+            if not _plain_user_line:
+                log_input_pipeline(
+                    "trueself.defer_input_while_http_chat",
+                    trace_id=None,
+                    detail=f"source={_src!r} has_text={bool(_txt)}",
+                )
+                self.bus.send_direct(self.agent_id, msg)
+                return
         delegation_score, best_persona = self._score_delegation(msg)
         chat_latency.trace_span(slot, "trueself_delegation_scored")
 
         if delegation_score >= self._fast_path_threshold and best_persona is not None:
-            log_chat_pipeline(
+            log_input_pipeline(
                 "trueself.route_delegate",
                 trace_id=_tid,
                 detail=f"target={best_persona.agent_id}",
@@ -270,7 +292,7 @@ class TrueSelfAgent(PersonaAgent):
             )
             self._delegate_to_persona(msg, best_persona)
         else:
-            log_chat_pipeline("trueself.route_self_trueself", trace_id=_tid)
+            log_input_pipeline("trueself.route_self_trueself", trace_id=_tid)
             if slot is not None:
                 slot["_cognitive_route"] = "normal:trueself"
             try:
@@ -284,16 +306,17 @@ class TrueSelfAgent(PersonaAgent):
                 "route=normal:trueself",
             )
             if is_sensor_pulse_no_chat_text(msg):
-                log_chat_pipeline(
+                log_input_pipeline(
                     "trueself.sensor_pulse_light",
                     trace_id=_tid,
                     detail="skip_full_persona_cycle",
                 )
                 self._complete_input_goal_from_message(msg)
                 return
+            completed = True
             try:
                 chat_latency.trace_span(slot, "trueself_before_persona_cycle")
-                self._process_message(msg, role="conversant")
+                completed = self._process_message(msg, role="conversant")
             except Exception as exc:
                 print(f"[TrueSelf] Self-process error: {exc}", flush=True)
                 self._last_response_payload = {
@@ -305,26 +328,29 @@ class TrueSelfAgent(PersonaAgent):
                     "persona_name": self.persona_name,
                 }
                 chat_latency.trace_attach_to_payload(slot, self._last_response_payload)
+                completed = True
             finally:
-                self._complete_input_goal_from_message(msg)
-            slot = msg.response_slot
-            if slot and not slot["event"].is_set():
-                payload = self._last_response_payload or {
-                    "response": "[no response generated]",
-                    "cycle": self.shared.cycle_count,
-                    "affect": {},
-                    "strategy": "fallback",
-                    "persona": self.agent_id,
-                    "persona_name": self.persona_name,
-                }
-                if "latency_trace" not in payload:
-                    chat_latency.trace_attach_to_payload(slot, payload)
-                slot["result"] = payload
-                slot["event"].set()
-                log_chat_pipeline("trueself.self_path_http_slot_set", trace_id=_tid)
-            pl = self._last_response_payload
-            if isinstance(pl, dict):
-                self._president_absorb_response(pl, self.agent_id)
+                if completed:
+                    self._complete_input_goal_from_message(msg)
+            if completed:
+                slot = msg.response_slot
+                if slot and not slot["event"].is_set():
+                    payload = self._last_response_payload or {
+                        "response": "[no response generated]",
+                        "cycle": self.shared.cycle_count,
+                        "affect": {},
+                        "strategy": "fallback",
+                        "persona": self.agent_id,
+                        "persona_name": self.persona_name,
+                    }
+                    if "latency_trace" not in payload:
+                        chat_latency.trace_attach_to_payload(slot, payload)
+                    slot["result"] = payload
+                    slot["event"].set()
+                    log_input_pipeline("trueself.self_path_http_slot_set", trace_id=_tid)
+                pl = self._last_response_payload
+                if isinstance(pl, dict) and not cognitive_phases_enabled():
+                    self._president_absorb_response(pl, self.agent_id)
 
     # -- delegation scoring ------------------------------------------------
 
@@ -403,7 +429,7 @@ class TrueSelfAgent(PersonaAgent):
             }
 
         self.bus.send_direct(persona.agent_id, delegate_msg)
-        log_chat_pipeline(
+        log_input_pipeline(
             "trueself.delegate_msg_sent",
             trace_id=trace_id_from_message(msg),
             detail=f"persona={persona.agent_id}",
@@ -449,7 +475,7 @@ class TrueSelfAgent(PersonaAgent):
         if slot:
             slot["result"] = result
             slot["event"].set()
-            log_chat_pipeline(
+            log_input_pipeline(
                 "trueself.persona_response_slot_set",
                 trace_id=trace_id_from_slot(slot),
                 detail=f"delegate={pending.get('delegate_id', '?')}",
@@ -498,6 +524,14 @@ class TrueSelfAgent(PersonaAgent):
                 aa.wake()
             except Exception:
                 pass
+
+    def _on_phased_cycle_finished(self, msg: Message) -> None:
+        super()._on_phased_cycle_finished(msg)
+        if msg.channel != "input":
+            return
+        pl = self._last_response_payload
+        if isinstance(pl, dict):
+            self._president_absorb_response(pl, self.agent_id)
 
     # -- delegation timeout handling ---------------------------------------
 

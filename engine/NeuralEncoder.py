@@ -15,6 +15,8 @@ If PyTorch is unavailable the class degrades to a no-op stub.
 from __future__ import annotations
 
 import os
+import threading
+from collections import OrderedDict
 
 from typing import Dict, Any, List, Optional
 import hashlib
@@ -207,6 +209,13 @@ class NeuralEncoder:
             self._fallback_model.eval()
             self._optimizer = torch.optim.Adam(self._fallback_model.parameters(), lr=1e-3)
 
+        self._embed_cache_lock = threading.Lock()
+        self._embed_cache: "OrderedDict[str, np.ndarray]" = OrderedDict()
+        try:
+            self._embed_cache_max = max(0, int(os.environ.get("HAROMA_ENCODER_CACHE_MAX", "512") or 0))
+        except (TypeError, ValueError):
+            self._embed_cache_max = 512
+
     @property
     def available(self) -> bool:
         return self._available
@@ -232,6 +241,49 @@ class NeuralEncoder:
             return "hash-bucket"
         return ""
 
+    def _ensure_embed_cache(self) -> None:
+        """Lazy-init cache fields (e.g. older persisted instances missing new attrs)."""
+        if getattr(self, "_embed_cache_lock", None) is not None:
+            return
+        self._embed_cache_lock = threading.Lock()
+        self._embed_cache = OrderedDict()
+        try:
+            self._embed_cache_max = max(0, int(os.environ.get("HAROMA_ENCODER_CACHE_MAX", "512") or 0))
+        except (TypeError, ValueError):
+            self._embed_cache_max = 512
+
+    def _embed_cache_key(self, text: str) -> str:
+        return hashlib.sha256(text.encode("utf-8", errors="ignore")).hexdigest()
+
+    def _embed_cache_get(self, text: str) -> Optional["np.ndarray"]:
+        self._ensure_embed_cache()
+        if self._embed_cache_max <= 0:
+            return None
+        k = self._embed_cache_key(text)
+        with self._embed_cache_lock:
+            hit = self._embed_cache.get(k)
+            if hit is None:
+                return None
+            self._embed_cache.move_to_end(k)
+            return np.copy(hit)
+
+    def _embed_cache_put(self, text: str, vec: "np.ndarray") -> None:
+        self._ensure_embed_cache()
+        if self._embed_cache_max <= 0:
+            return
+        k = self._embed_cache_key(text)
+        with self._embed_cache_lock:
+            self._embed_cache[k] = vec.copy()
+            self._embed_cache.move_to_end(k)
+            while len(self._embed_cache) > self._embed_cache_max:
+                self._embed_cache.popitem(last=False)
+
+    def _embed_cache_clear(self) -> None:
+        if getattr(self, "_embed_cache_lock", None) is None:
+            return
+        with self._embed_cache_lock:
+            self._embed_cache.clear()
+
     def _to_ids(self, text: str) -> Optional["torch.Tensor"]:
         """Hash-bucket tokenization (fallback path only)."""
         if not self._available:
@@ -249,10 +301,15 @@ class NeuralEncoder:
             return None
 
         if self._pretrained and self._backbone is not None:
+            cached = self._embed_cache_get(text)
+            if cached is not None:
+                return cached
             with torch.no_grad():
                 backbone_out = self._backbone.encode([text])
                 projected = self._projection(backbone_out)
-            return projected.squeeze(0).cpu().numpy().copy()
+            out = projected.squeeze(0).cpu().numpy().copy()
+            self._embed_cache_put(text, out)
+            return out
 
         ids = self._to_ids(text)
         if ids is None:
@@ -289,6 +346,8 @@ class NeuralEncoder:
             return 0.0
         if not anchor_text or not positive_texts or not negative_texts:
             return 0.0
+
+        self._embed_cache_clear()
 
         _fab = _get_fabric()
 

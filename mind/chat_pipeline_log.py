@@ -1,13 +1,19 @@
-"""Correlated console logs for debugging where a /chat turn stalls.
+"""Correlated console logs for debugging where an input turn stalls.
 
-Set ``HAROMA_CHAT_PIPELINE_LOG=1`` (or ``true`` / ``yes`` / ``on``). Each line uses
-prefix ``[ChatPipeline]`` and ``trace=<id>`` when :func:`agents.input_agent.InputAgent.push_text`
-has assigned ``cognitive_trace_id`` on the wait slot.
+HTTP ``/chat`` is one path; other inputs (sensor, teach, etc.) share the same
+pipeline stages on the input → TrueSelf → persona path.
 
-**Timed pipeline (per-stage deltas):** set ``HAROMA_CHAT_PIPELINE_TIMING=1``, or set
-``HAROMA_CHAT_PIPELINE_LOG=full`` to enable both stage logs and timing in one flag.
-Each line then includes ``seg=…ms cum=…ms`` — time since the *previous* pipeline log for
-this trace, and cumulative time since the first log for this trace.
+Set ``HAROMA_INPUT_PIPELINE_LOG=1`` (or ``true`` / ``yes`` / ``on``). The legacy
+name ``HAROMA_CHAT_PIPELINE_LOG`` is still read if the new variable is unset.
+Each line uses prefix ``[InputPipeline]`` and ``trace=<id>`` when
+:func:`agents.input_agent.InputAgent.push_text` has assigned ``cognitive_trace_id``
+on the wait slot.
+
+**Timed pipeline (per-stage deltas):** set ``HAROMA_INPUT_PIPELINE_TIMING=1``, or the
+legacy ``HAROMA_CHAT_PIPELINE_TIMING=1``, or set ``HAROMA_INPUT_PIPELINE_LOG=full``
+(legacy: ``HAROMA_CHAT_PIPELINE_LOG=full``) to enable both stage logs and timing in
+one flag. Each line then includes ``seg=…ms cum=…ms`` — time since the *previous*
+pipeline log for this trace, and cumulative time since the first log for this trace.
 
 Stages are ordered roughly: ``http.*`` → ``input.*`` → ``trueself.*`` → ``persona.*``.
 The last stage printed before a hang indicates where the pipeline blocked.
@@ -32,12 +38,15 @@ import time
 from typing import Any, Dict, Optional, Tuple
 
 __all__ = [
-    "chat_pipeline_log_enabled",
-    "log_chat_pipeline",
+    "input_pipeline_log_enabled",
+    "log_input_pipeline",
     "pipeline_timing_enabled",
     "pipeline_trace_end",
     "trace_id_from_message",
     "trace_id_from_slot",
+    # Backward compatibility (chat-only naming)
+    "chat_pipeline_log_enabled",
+    "log_chat_pipeline",
 ]
 
 _lock = threading.Lock()
@@ -54,21 +63,24 @@ def _trim_traces_if_needed() -> None:
         _trace_times.pop(k, None)
 
 
-def chat_pipeline_log_enabled() -> bool:
-    v = str(os.environ.get("HAROMA_CHAT_PIPELINE_LOG", "") or "").strip().lower()
+def _env_primary_then_legacy(primary: str, legacy: str) -> str:
+    v = str(os.environ.get(primary, "") or "").strip()
+    if v:
+        return v
+    return str(os.environ.get(legacy, "") or "").strip()
+
+
+def input_pipeline_log_enabled() -> bool:
+    v = _env_primary_then_legacy("HAROMA_INPUT_PIPELINE_LOG", "HAROMA_CHAT_PIPELINE_LOG").lower()
     return v in ("1", "true", "yes", "on", "full")
 
 
 def pipeline_timing_enabled() -> bool:
-    v = str(os.environ.get("HAROMA_CHAT_PIPELINE_LOG", "") or "").strip().lower()
+    v = _env_primary_then_legacy("HAROMA_INPUT_PIPELINE_LOG", "HAROMA_CHAT_PIPELINE_LOG").lower()
     if v == "full":
         return True
-    return str(os.environ.get("HAROMA_CHAT_PIPELINE_TIMING", "") or "").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
-    )
+    t = _env_primary_then_legacy("HAROMA_INPUT_PIPELINE_TIMING", "HAROMA_CHAT_PIPELINE_TIMING").lower()
+    return t in ("1", "true", "yes", "on")
 
 
 def trace_id_from_slot(slot: Optional[Dict[str, Any]]) -> Optional[str]:
@@ -105,8 +117,8 @@ def pipeline_trace_end(trace_id: Optional[str]) -> None:
         _trace_times.pop(trace_id, None)
 
 
-def log_chat_pipeline(stage: str, *, trace_id: Optional[str] = None, detail: str = "") -> None:
-    if not chat_pipeline_log_enabled():
+def log_input_pipeline(stage: str, *, trace_id: Optional[str] = None, detail: str = "") -> None:
+    if not input_pipeline_log_enabled():
         return
     timing_suffix = ""
     if pipeline_timing_enabled() and trace_id:
@@ -125,4 +137,9 @@ def log_chat_pipeline(stage: str, *, trace_id: Optional[str] = None, detail: str
             timing_suffix = f" seg={seg_ms:.2f}ms cum={cum_ms:.2f}ms"
     t = f" trace={trace_id}" if trace_id else ""
     d = f" | {detail}" if detail else ""
-    print(f"[ChatPipeline]{t} {stage}{timing_suffix}{d}", flush=True)
+    print(f"[InputPipeline]{t} {stage}{timing_suffix}{d}", flush=True)
+
+
+# Legacy names (same behavior)
+chat_pipeline_log_enabled = input_pipeline_log_enabled
+log_chat_pipeline = log_input_pipeline

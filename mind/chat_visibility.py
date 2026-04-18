@@ -77,28 +77,30 @@ def resolve_chat_visible_text(
 
     For packed JSON output (``source == \"llm_context_reasoning\"``), the user
     line is the parsed JSON **answer** field — not raw model text that may
-    include fences or duplicate prose. Otherwise prefer non-empty
-    ``action[\"text\"]``; then map ``llm_context[\"source\"]`` to error copy;
-    then ``llm_context[\"answer\"]``; else unknown.
+    include fences or duplicate prose. For non-JSON prose (``llm_nonjson_reply``)
+    and related sources, ``llm_context[\"answer\"]`` wins over ``action[\"text\"]``.
+    When ``source`` is an LLM failure (timeout, error, parse failure, empty,
+    unavailable), the mapped user message is returned even if ``action[\"text\"]``
+    is non-empty. Otherwise prefer non-empty ``action[\"text\"]``; then
+    ``llm_context[\"answer\"]``; identity fallback; else unknown.
     """
     lc = llm_context if isinstance(llm_context, dict) else {}
     src = str(lc.get("source") or "").strip().lower()
-    # Prefer model answer for both structured JSON and HAROMA_LLM_CHAT_ONLY plain text;
-    # deliberative action["text"] can still be a placeholder if those paths disagree.
-    if src in ("llm_context_reasoning", "chat_only", "dummy_probe"):
+    # Prefer model answer for structured JSON, chat-only, dummy probe, and non-JSON prose
+    # (``llm_nonjson_reply``) — otherwise deliberative ``action["text"]`` can echo the user line.
+    if src in (
+        "llm_context_reasoning",
+        "chat_only",
+        "dummy_probe",
+        "llm_nonjson_reply",
+    ):
         _parsed = str(lc.get("answer") or "").strip()
         if _parsed:
             vis = _visible_line(_parsed)
             if vis:
                 return vis
-    raw = action.get("text")
-    text_out = str(raw).strip() if raw is not None and str(raw).strip() else ""
-    if text_out.strip() == CHAT_RESPONSE_UNKNOWN.strip():
-        text_out = ""
-    if text_out:
-        vis = _visible_line(text_out)
-        if vis:
-            return vis
+    # Failures from the packed LLM pass must not be hidden by deliberative ``action["text"]``
+    # (which can repeat the user line or a generic line when the model timed out).
     if src == "llm_timeout":
         return CHAT_RESPONSE_LLM_TIMEOUT
     if src == "llm_error":
@@ -109,6 +111,14 @@ def resolve_chat_visible_text(
         return CHAT_RESPONSE_LLM_NO_REPLY
     if src == "llm_unavailable":
         return CHAT_RESPONSE_LLM_UNAVAILABLE
+    raw = action.get("text")
+    text_out = str(raw).strip() if raw is not None and str(raw).strip() else ""
+    if text_out.strip() == CHAT_RESPONSE_UNKNOWN.strip():
+        text_out = ""
+    if text_out:
+        vis = _visible_line(text_out)
+        if vis:
+            return vis
     _lc_ans = str(lc.get("answer") or "").strip()
     if _lc_ans:
         vis = _visible_line(_lc_ans)

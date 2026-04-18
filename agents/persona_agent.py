@@ -31,16 +31,22 @@ without paying native LLM decode.
 **Shared neural read lock (1s cooperative budget)** — see :mod:`mind.lock_budget`.
 Inference uses two short ``neural_sync`` / ``persona_neural_section`` slices (embed +
 perception, then gate / backbone / self-model / discourse), then recall through
-reasoning **without** holding the neural RW lock so other threads can interleave.
+reasoning **without** holding the neural RW lock. After packed LLM, counterfactual
+through action/outcome/memory **run off lock**; only self-model compare, trainable
+``record_outcome`` updates, and composer context/recording use short locks.
 Heavy follow-up can schedule work onto the persona thread via
 ``_schedule_persona_merge`` (same-thread callbacks).
 
-**Multi-tick continuation:** A single delegated message is still processed to
-completion in one :meth:`_process_message` call (HTTP response is filled before
-the next tick). Cross-tick *deferral* of half-processed messages is not
-implemented; the cooperative lock budget is met by **short neural slices**,
-**off-lock** recall/reasoning, and optional **background** training round-robin
-(``HAROMA_BG_MAX_TRAIN_MODULES_PER_TICK``), not by checkpointing mid-cycle state.
+**Multi-tick continuation:** Set ``HAROMA_PERSONA_PHASED_CYCLE=1`` so
+:meth:`_process_message` runs the pipeline as a generator with yields between
+major groups; each call advances up to ``HAROMA_PERSONA_PHASE_STEPS_PER_TICK``
+phase boundaries, and :meth:`_advance_cognitive_phases_on_tick` continues pending
+generators on later ticks — **except** HTTP-traced TrueSelf conversant turns,
+which default to one full run (``HAROMA_TRUESELF_HTTP_CHAT_UNPHASED``, default on)
+so ``/chat`` is not stretched across many ticks. When phased mode is off, the full
+cycle still runs in one call. The cooperative lock
+budget is still met by **short neural slices**, **off-lock** recall/reasoning,
+and optional **background** training round-robin (``HAROMA_BG_MAX_TRAIN_MODULES_PER_TICK``).
 
 Each cycle binds ``episode.brain_like_state`` (arousal / exploration / stability /
 plasticity / consolidation pressure) — see ``mind.humanoid_brain_state``. Optional
@@ -56,7 +62,7 @@ import random
 import re
 import threading
 import time
-from typing import Any, Callable, Dict, List, Optional, Set, TYPE_CHECKING
+from typing import Any, Callable, Dict, Iterator, List, Optional, Set, TYPE_CHECKING
 
 import numpy as np
 
@@ -76,8 +82,26 @@ from mind.cognitive_contracts import (
     resolve_chat_visible_text,
 )
 from mind.user_identity import sanitize_user_id, speaker_key, user_tag
-from mind.chat_pipeline_log import log_chat_pipeline, trace_id_from_message
-from mind.chat_priority import chat_input_priority_defer_non_user, input_pipeline_busy
+from mind.chat_pipeline_log import log_input_pipeline, trace_id_from_message
+from mind.cognitive_loop_groups import (
+    COGNITIVE_PHASE_NEURAL_GATE,
+    COGNITIVE_PHASE_POST_LLM,
+    COGNITIVE_PHASE_PRE_LLM,
+    cognitive_phases_enabled,
+    phase_steps_per_invocation,
+)
+from mind.chat_priority import (
+    chat_input_priority_defer_non_user,
+    input_pipeline_busy,
+    input_pipeline_yield_busy,
+)
+from mind.persona_http_yield import (
+    defer_inner_cycle_before_neural,
+    http_chat_inflight_positive,
+    inner_relay_should_requeue,
+    internal_treat_as_over_budget,
+    skip_semantic_recall_for_internal,
+)
 from core.cognitive_null import is_cognitive_null
 from core.self_model_train_batch import SelfModelTrainBatch
 from core.derivation_merge import merge_derivation_artifacts
@@ -199,6 +223,9 @@ class PersonaAgent(BaseAgent):
         # (see ``_schedule_persona_merge`` — same thread as ``_process_message``).
         self._persona_merge_queue: List[Callable[[], None]] = []
         self._persona_merge_lock = threading.Lock()
+        self._cognitive_phase_gens: Dict[str, Iterator[Any]] = {}
+        self._cognitive_phase_msgs: Dict[str, Message] = {}
+        self._cognitive_phase_lock = threading.Lock()
 
         # Subscribe to delegation from TrueSelf and inter-persona relay
         self.bus.subscribe("trueself_delegate", self.agent_id)
@@ -247,10 +274,20 @@ class PersonaAgent(BaseAgent):
 
     def _tick(self):
         self._drain_persona_merge_queue()
+        self._advance_cognitive_phases_on_tick()
         messages = self.poll()
         if not messages:
             self._run_idle_cycle()
             return
+
+        # User delegation before inter-persona relay when multiple messages land in one tick.
+        messages = [
+            m
+            for _, m in sorted(
+                enumerate(messages),
+                key=lambda im: (0 if im[1].channel == "trueself_delegate" else 1, im[0]),
+            )
+        ]
 
         if chat_input_priority_defer_non_user(self.shared, getattr(self, "_boot_agent", None)):
             delegates = [m for m in messages if m.channel == "trueself_delegate"]
@@ -276,19 +313,25 @@ class PersonaAgent(BaseAgent):
     def _handle_delegated_message(self, msg: Message):
         """Process a message delegated by TrueSelf and send result back."""
         _ptid = trace_id_from_message(msg)
-        log_chat_pipeline(
+        log_input_pipeline(
             "persona.delegated_received",
             trace_id=_ptid,
             detail=f"agent={self.agent_id}",
         )
+        completed = True
         try:
-            self._process_message(msg, role="conversant")
+            completed = self._process_message(msg, role="conversant")
         except Exception as exc:
             print(
                 f"[Persona:{self.agent_id}] delegation processing failed: "
                 f"{type(exc).__name__}: {exc}",
                 flush=True,
             )
+            if cognitive_phases_enabled():
+                _k = self._cognitive_phase_key(msg)
+                with self._cognitive_phase_lock:
+                    self._cognitive_phase_gens.pop(_k, None)
+                    self._cognitive_phase_msgs.pop(_k, None)
             self._last_response_payload = {
                 "response": f"[processing error: {type(exc).__name__}]",
                 "cycle": self.shared.cycle_count,
@@ -303,11 +346,14 @@ class PersonaAgent(BaseAgent):
             if slot and not slot["event"].is_set():
                 slot["result"] = self._last_response_payload
                 slot["event"].set()
+            completed = True
         finally:
             # TrueSelf does not wrap delegation in a completion finally; match
             # Fuel / Atomos semantics on both success and exception paths.
-            self._complete_input_goal_from_message(msg)
-        self._send_response_to_trueself(msg)
+            if completed:
+                self._complete_input_goal_from_message(msg)
+        if completed:
+            self._send_response_to_trueself(msg)
 
     def _send_response_to_trueself(self, msg: Message):
         """Send the processing result back to TrueSelf for HTTP slot filling."""
@@ -324,7 +370,7 @@ class PersonaAgent(BaseAgent):
             }
         payload = dict(base)
         payload["delegated_from"] = "trueself"
-        log_chat_pipeline(
+        log_input_pipeline(
             "persona.bus_send_persona_response",
             trace_id=trace_id_from_message(msg),
             detail=f"agent={self.agent_id}",
@@ -350,15 +396,35 @@ class PersonaAgent(BaseAgent):
         is_reply = msg.message_type == "dialogue_reply"
         if not is_reply and self.agent_id in msg.prior_processors:
             return
+        if http_chat_inflight_positive(self.shared) and inner_relay_should_requeue(
+            msg.message_type
+        ):
+            self.bus.send_direct(self.agent_id, msg)
+            return
         try:
-            self._process_message(msg, role="conversant")
+            if cognitive_phases_enabled():
+                gen = self._process_message_phased(msg, role="conversant")
+                try:
+                    while True:
+                        next(gen)
+                except StopIteration:
+                    pass
+                completed = True
+            else:
+                completed = self._process_message(msg, role="conversant")
         except Exception as exc:
             print(
                 f"[Persona:{self.agent_id}] relay processing failed: {type(exc).__name__}: {exc}",
                 flush=True,
             )
+            if cognitive_phases_enabled():
+                _k = self._cognitive_phase_key(msg)
+                with self._cognitive_phase_lock:
+                    self._cognitive_phase_gens.pop(_k, None)
+                    self._cognitive_phase_msgs.pop(_k, None)
             return
-        self._maybe_dialogue_reply(msg)
+        if completed:
+            self._maybe_dialogue_reply(msg)
 
     def _handle_reconcile_update(self, msg: Message):
         """Absorb reconciliation or dream results into working memory."""
@@ -592,11 +658,13 @@ class PersonaAgent(BaseAgent):
             )
 
     def _yield_after_cycle_if_input_pipeline_busy(self) -> None:
-        """After a cognitive cycle, if input (HTTP /chat and/or InputAgent queues) is busy, pause.
+        """After a cognitive cycle, if HTTP/text input is still active, briefly pause.
 
-        Uses :func:`mind.chat_priority.input_pipeline_busy`. Sleeps
+        Uses :func:`mind.chat_priority.input_pipeline_yield_busy` (not full
+        :func:`~mind.chat_priority.input_pipeline_busy`) so a **sensor-only** backlog
+        does not trigger multi-second sleeps. Sleeps
         ``HAROMA_POST_CYCLE_INPUT_BUSY_SLEEP_SEC`` (else legacy
-        ``HAROMA_POST_CYCLE_CHAT_BUSY_SLEEP_SEC``, default ``3``) between checks.
+        ``HAROMA_POST_CYCLE_CHAT_BUSY_SLEEP_SEC``, default ``0.05``) between checks.
         ``HAROMA_POST_CYCLE_INPUT_BUSY_MAX_RETRIES`` (else legacy
         ``HAROMA_POST_CYCLE_CHAT_BUSY_MAX_RETRIES``, default ``1``) caps sleeps per
         cycle; ``0`` = retry until the pipeline is idle.
@@ -606,15 +674,15 @@ class PersonaAgent(BaseAgent):
             if s is None:
                 return
             _boot = getattr(self, "_boot_agent", None)
-            if not input_pipeline_busy(s, _boot):
+            if not input_pipeline_yield_busy(s, _boot):
                 return
             _raw_sleep = os.environ.get("HAROMA_POST_CYCLE_INPUT_BUSY_SLEEP_SEC")
             if _raw_sleep is None or str(_raw_sleep).strip() == "":
-                _raw_sleep = os.environ.get("HAROMA_POST_CYCLE_CHAT_BUSY_SLEEP_SEC", "3")
+                _raw_sleep = os.environ.get("HAROMA_POST_CYCLE_CHAT_BUSY_SLEEP_SEC", "0.05")
             try:
-                sec = float(_raw_sleep or "3")
+                sec = float(_raw_sleep or "0.05")
             except (TypeError, ValueError):
-                sec = 3.0
+                sec = 0.05
             if sec <= 0:
                 return
             _raw_max = os.environ.get("HAROMA_POST_CYCLE_INPUT_BUSY_MAX_RETRIES")
@@ -625,10 +693,10 @@ class PersonaAgent(BaseAgent):
             except (TypeError, ValueError):
                 max_retries = 1
             retries = 0
-            while input_pipeline_busy(s, _boot):
+            while input_pipeline_yield_busy(s, _boot):
                 time.sleep(sec)
                 retries += 1
-                if not input_pipeline_busy(s, _boot):
+                if not input_pipeline_yield_busy(s, _boot):
                     break
                 if max_retries == 0:
                     continue
@@ -637,8 +705,101 @@ class PersonaAgent(BaseAgent):
         except Exception:
             pass
 
-    def _process_message(self, msg: Message, role: str = "observer"):
+    def _unphased_trueself_http_traced_conversant(self, msg: Message, role: str) -> bool:
+        """TrueSelf + HTTP trace + conversant: run full cycle in one call (no phased ticks).
+
+        Phased mode schedules work across agent ticks (``_advance_cognitive_phases_on_tick``
+        runs before ``poll()``), which adds multi-second latency to ``/chat`` even
+        when the LLM is dummy. Specialists keep phased scheduling; TrueSelf user
+        replies should complete in one ``_handle_input`` stack.
+        """
+        if role != "conversant":
+            return False
+        if getattr(self, "AGENT_TYPE", None) != "trueself":
+            return False
+        if trace_id_from_message(msg) is None:
+            return False
+        return env_flag("HAROMA_TRUESELF_HTTP_CHAT_UNPHASED", True)
+
+    def _process_message(self, msg: Message, role: str = "observer") -> bool:
         """Run the full cognitive cycle on a message.
+
+        Returns True when the cycle finished (or phased mode is off). When
+        ``HAROMA_PERSONA_PHASED_CYCLE`` is enabled, returns False until the last
+        phase completes; pending work continues via :meth:`_advance_cognitive_phases_on_tick`.
+        """
+        if self._unphased_trueself_http_traced_conversant(msg, role):
+            gen = self._process_message_phased(msg, role)
+            try:
+                while True:
+                    next(gen)
+            except StopIteration:
+                pass
+            return True
+        if not cognitive_phases_enabled():
+            gen = self._process_message_phased(msg, role)
+            try:
+                while True:
+                    next(gen)
+            except StopIteration:
+                pass
+            return True
+        key = self._cognitive_phase_key(msg)
+        with self._cognitive_phase_lock:
+            gen = self._cognitive_phase_gens.get(key)
+            if gen is None:
+                gen = self._process_message_phased(msg, role)
+                self._cognitive_phase_gens[key] = gen
+                self._cognitive_phase_msgs[key] = msg
+        steps = phase_steps_per_invocation()
+        for _ in range(steps):
+            with self._cognitive_phase_lock:
+                gen = self._cognitive_phase_gens.get(key)
+                if gen is None:
+                    return True
+            try:
+                next(gen)
+            except StopIteration:
+                with self._cognitive_phase_lock:
+                    self._cognitive_phase_gens.pop(key, None)
+                    msg_done = self._cognitive_phase_msgs.pop(key, None)
+                if msg_done is not None:
+                    self._on_phased_cycle_finished(msg_done)
+                return True
+        return False
+
+    def _on_phased_cycle_finished(self, msg: Message) -> None:
+        """Notify TrueSelf when a delegated phased cycle finishes on a later tick."""
+        if msg.channel == "trueself_delegate":
+            self._send_response_to_trueself(msg)
+
+    def _cognitive_phase_key(self, msg: Message) -> str:
+        return f"{self.agent_id}:{msg.message_id}"
+
+    def _advance_cognitive_phases_on_tick(self) -> None:
+        if not cognitive_phases_enabled():
+            return
+        steps = phase_steps_per_invocation()
+        with self._cognitive_phase_lock:
+            keys = list(self._cognitive_phase_gens.keys())
+        for key in keys:
+            for _ in range(steps):
+                with self._cognitive_phase_lock:
+                    gen = self._cognitive_phase_gens.get(key)
+                    if gen is None:
+                        break
+                try:
+                    next(gen)
+                except StopIteration:
+                    with self._cognitive_phase_lock:
+                        self._cognitive_phase_gens.pop(key, None)
+                        msg_done = self._cognitive_phase_msgs.pop(key, None)
+                    if msg_done is not None:
+                        self._on_phased_cycle_finished(msg_done)
+                    break
+
+    def _process_message_phased(self, msg: Message, role: str = "observer") -> Iterator[str]:
+        """Generator implementing the cognitive cycle; yields phase ids when phased mode is on.
 
         This is the heart of Elarion -- extracted from
         ElarionController.run_cycle and adapted for per-persona state.
@@ -689,6 +850,8 @@ class PersonaAgent(BaseAgent):
         )
 
         def _over_budget():
+            if internal_treat_as_over_budget(is_internal, self.shared):
+                return True
             return (time.time() - t0) > budget
 
         def _step_time(label, since=None):
@@ -728,13 +891,14 @@ class PersonaAgent(BaseAgent):
         _first_encounter_asks_name = False
 
         _pipe_tid = trace_id_from_message(msg)
-        # TrueSelf + real user /chat: cap pre-packed-LLM work so optional phases skip sooner.
-        # Default 1.2s toward ~1–2s end-to-end when paired with a fast decode (GPU/small cap).
+        # TrueSelf + real user /chat: wall-clock budget for work *before* packed LLM (including
+        # the first two neural slices: encounter embedding, backbone encode, discourse/ToM when
+        # time remains). Default 1.2s toward ~1–2s end-to-end with a fast decode.
         # Set HAROMA_TRUESELF_USER_CHAT_BUDGET_SEC=0 to use the normal persona budget (2s).
         if (
             _trueself_agent
             and role == "conversant"
-            and _src_lc == "user"
+            and _user_or_traced_turn
             and not is_internal
         ):
             _raw_ub = os.environ.get("HAROMA_TRUESELF_USER_CHAT_BUDGET_SEC")
@@ -756,7 +920,28 @@ class PersonaAgent(BaseAgent):
         # TrueSelf + HTTP trace: skip ``persona_cycle_lock`` so /chat does not wait behind
         # primary/analyst neural sections (still uses shared neural read lock vs training).
         _trueself_traced_fast = _trueself_agent and bool(_pipe_tid)
-        log_chat_pipeline(
+        # Tight pre-LLM path: honor ``HAROMA_TRUESELF_USER_CHAT_BUDGET_SEC`` inside the first
+        # two neural slices (encounter/discourse/interlocutor were previously unconditional).
+        _ts_http_fast = (
+            _trueself_agent
+            and bool(_pipe_tid)
+            and role == "conversant"
+            and not is_internal
+            and _user_or_traced_turn
+        )
+        if is_internal:
+            try:
+                if int(getattr(self.shared, "http_chat_inflight", 0) or 0) > 0:
+                    log_input_pipeline(
+                        "persona.defer_inner_cycle_http_chat",
+                        trace_id=_pipe_tid,
+                        detail=f"agent={self.agent_id}",
+                    )
+                    self.bus.send_direct(self.agent_id, msg)
+                    return
+            except Exception:
+                pass
+        log_input_pipeline(
             "persona.before_neural_sync",
             trace_id=_pipe_tid,
             detail=(
@@ -768,7 +953,7 @@ class PersonaAgent(BaseAgent):
             s.neural_sync() if _trueself_traced_fast else s.persona_neural_section()
         )
         with _sync_ctx:
-            log_chat_pipeline("persona.inside_neural_sync", trace_id=_pipe_tid)
+            log_input_pipeline("persona.inside_neural_sync", trace_id=_pipe_tid)
             trace_span(_trace_slot, "persona_neural_sync_enter")
             episode = EpisodeContext(cycle_id=cycle_id, role=role)
             episode.bind_agent_environment(s.get_agent_environment_snapshot())
@@ -790,7 +975,19 @@ class PersonaAgent(BaseAgent):
             # -- 1. Persona-specific perception ----------------------------
             symbolic_input = {}
             nlu_result = dict(nlu_base)
-            if (text or sensor_data) and s.perception:
+            _sensor_non_chat = {
+                k: v
+                for k, v in (sensor_data or {}).items()
+                if str(k).strip().lower() != "chat"
+            }
+            _lite_http_perc = (
+                _ts_http_fast
+                and env_flag("HAROMA_TRUESELF_USER_CHAT_LITE_PERCEPTION", True)
+                and not _sensor_non_chat
+            )
+            if _lite_http_perc:
+                symbolic_input = {"content": text, "tags": tags, "nlu": nlu_base}
+            elif (text or sensor_data) and s.perception:
                 try:
                     percept_input = {"content": text, "tags": tags}
                     for sensor_channel, readings in sensor_data.items():
@@ -812,6 +1009,9 @@ class PersonaAgent(BaseAgent):
 
             if sensor_data:
                 symbolic_input["sensor_data"] = sensor_data
+            _sttd = content_data.get("sensor_text_translation_digest")
+            if isinstance(_sttd, str) and _sttd.strip():
+                symbolic_input["sensor_text_translation_digest"] = _sttd.strip()
             _senses_np_bundle = content_data.get("senses_numpy")
             if isinstance(_senses_np_bundle, dict):
                 symbolic_input["senses_numpy"] = _senses_np_bundle
@@ -826,18 +1026,21 @@ class PersonaAgent(BaseAgent):
                     _sym_tags.append(_user_tag)
                     symbolic_input["tags"] = _sym_tags
             _ground = (content or text or "").strip()
-            if _ground and getattr(s, "meaning_lexicon", None):
+            if _ground and getattr(s, "meaning_lexicon", None) and not (
+                _ts_http_fast and _over_budget()
+            ):
                 _tm = s.meaning_lexicon.match_in_text(_ground, max_hits=3)
                 if _tm:
                     symbolic_input["taught_meanings"] = _tm
             episode.bind_perception(symbolic_input)
 
             # Record encounter in persona's memory branch
-            node = s.memory.create_node_from(symbolic_input)
-            branch_name = f"{AGENT_PREFIX}{self.agent_id}"
-            s.memory.add_node("encounter_tree", branch_name, node)
+            if not (_ts_http_fast and _over_budget()):
+                node = s.memory.create_node_from(symbolic_input)
+                branch_name = f"{AGENT_PREFIX}{self.agent_id}"
+                s.memory.add_node("encounter_tree", branch_name, node)
 
-            if has_external and content:
+            if has_external and content and not (_ts_http_fast and _over_budget()):
                 self.working_memory.add(
                     content=content[:80],
                     source="perception",
@@ -863,7 +1066,17 @@ class PersonaAgent(BaseAgent):
                 except Exception:
                     pass
             _encoder_real = _is_real_module(_pe)
-            if current_embedding is None and content and _encoder_real and not is_internal:
+            _skip_ts_embed = _ts_http_fast and env_flag(
+                "HAROMA_TRUESELF_USER_CHAT_SKIP_PERSONA_ENCODE", True
+            )
+            if (
+                current_embedding is None
+                and content
+                and _encoder_real
+                and not is_internal
+                and not _skip_ts_embed
+                and not (_ts_http_fast and _over_budget())
+            ):
                 current_embedding = _pe.encode(content)
 
             # Ensure embedding matches backbone's expected dimension (always 1-D)
@@ -887,6 +1100,9 @@ class PersonaAgent(BaseAgent):
 
             _st = _step_time("1-perception+embed")
 
+        # TrueSelf HTTP /chat: after slice 1, skip heavy slice-2 work if user-chat budget already exceeded.
+        _ts_skip_neural_b_heavy = _ts_http_fast and _over_budget()
+
         # Second short neural read (shared lock budget): gate, backbone, self-model, discourse.
         _sync_ctx_b = (
             s.neural_sync() if _trueself_traced_fast else s.persona_neural_section()
@@ -904,7 +1120,8 @@ class PersonaAgent(BaseAgent):
             _bb = getattr(s, "backbone", None)
             _z_t = None
             if (
-                _bb is not None
+                not _ts_skip_neural_b_heavy
+                and _bb is not None
                 and getattr(_bb, "available", False)
                 and getattr(_bb, "_encoder", None) is not None
                 and _bb.learned_weight >= 0.01
@@ -917,76 +1134,84 @@ class PersonaAgent(BaseAgent):
                 _conv_skip = s.process_gate._CONVERSANT_SKIP
             _gate_decisions = s.process_gate.decide(_gate_features, z_t=_z_t, force_off=_conv_skip)
 
-            # -- 1.5. Self-prediction --------------------------------------
-            self_prediction = {}
-            if _gate_decisions.get("self_prediction", True):
-                self_prediction = (
-                    s.self_model.predict(current_embedding, self._prev_cycle_state) or {}
-                )
-            if self_prediction:
-                episode.bind_self_prediction(self_prediction)
-
-            # -- 1.6. NLU + Discourse --------------------------------------
             episode.bind_nlu(nlu_result)
 
-            _discourse_result = None
-            _discourse_frames_dicts: List[Dict[str, Any]] = []
-            if nlu_result:
-                _conv_history = [
-                    t.to_dict()
-                    for t in self.conversation.get_recent(
-                        5, speaker=_speaker_key if _session_uid else None
+            if _ts_skip_neural_b_heavy:
+                # Budget already spent in slice 1 — skip self-model/discourse/ToM for latency.
+                self_prediction = {}
+                _discourse_result = None
+                _discourse_frames_dicts = []
+                interlocutor_snapshot = {}
+                _mental_prediction = {}
+            else:
+                # -- 1.5. Self-prediction --------------------------------------
+                self_prediction = {}
+                if _gate_decisions.get("self_prediction", True):
+                    self_prediction = (
+                        s.self_model.predict(current_embedding, self._prev_cycle_state) or {}
                     )
-                ]
-                _discourse_result = s.discourse.process(
-                    nlu_result,
-                    conversation_history=_conv_history,
-                    cycle_id=cycle_id,
-                )
-                _discourse_frames_dicts = [f.to_dict() for f in _discourse_result.frames]
+                if self_prediction:
+                    episode.bind_self_prediction(self_prediction)
 
-            # -- 1.7. Interlocutor model + mental simulator ----------------
-            interlocutor_snapshot = {}
-            _mental_prediction: Dict[str, Any] = {}
-            if _gate_decisions.get("interlocutor_model", True):
-                if has_external and content:
-                    s.interlocutor_model.update(
-                        speaker=_speaker_key,
-                        content=content,
-                        nlu_result=nlu_result,
-                        cycle_id=cycle_id,
-                        discourse_frames=_discourse_frames_dicts or None,
-                    )
-                    observed_action = nlu_result.get("intent", "speak")
-                    _action_map = {
-                        "declarative": "speak",
-                        "utterance": "speak",
-                        "statement": "speak",
-                        "interrogative": "speak",
-                        "question": "speak",
-                        "imperative": "speak",
-                        "exclamatory": "emote",
-                    }
-                    observed_mapped = _action_map.get(observed_action, "speak")
-                    s.mental_simulator.update_model(
-                        agent_id=_speaker_key,
-                        observed_action=observed_mapped,
-                        discourse_frames=_discourse_frames_dicts or None,
-                        context={
-                            "content": content,
-                            "sentiment": nlu_result.get("sentiment", {}),
-                        },
+                # -- 1.6. NLU + Discourse --------------------------------------
+                _discourse_result = None
+                _discourse_frames_dicts = []
+                if nlu_result:
+                    _conv_history = [
+                        t.to_dict()
+                        for t in self.conversation.get_recent(
+                            5, speaker=_speaker_key if _session_uid else None
+                        )
+                    ]
+                    _discourse_result = s.discourse.process(
+                        nlu_result,
+                        conversation_history=_conv_history,
                         cycle_id=cycle_id,
                     )
-                    if _session_uid and role == "conversant":
-                        _st_ix = s.interlocutor_model.speakers.get(_speaker_key)
-                        if _st_ix is not None and _st_ix.interaction_count == 1:
-                            if not s.get_user_display_name(_session_uid):
-                                _first_encounter_asks_name = True
-                interlocutor_snapshot = s.interlocutor_model.get_model_summary(_speaker_key)
-                _mental_prediction = s.mental_simulator.predict_behavior(_speaker_key)
-                interlocutor_snapshot["mental_prediction"] = _mental_prediction
-                episode.bind_theory_of_mind(interlocutor_snapshot)
+                    _discourse_frames_dicts = [f.to_dict() for f in _discourse_result.frames]
+
+                # -- 1.7. Interlocutor model + mental simulator ----------------
+                interlocutor_snapshot = {}
+                _mental_prediction = {}
+                if _gate_decisions.get("interlocutor_model", True):
+                    if has_external and content:
+                        s.interlocutor_model.update(
+                            speaker=_speaker_key,
+                            content=content,
+                            nlu_result=nlu_result,
+                            cycle_id=cycle_id,
+                            discourse_frames=_discourse_frames_dicts or None,
+                        )
+                        observed_action = nlu_result.get("intent", "speak")
+                        _action_map = {
+                            "declarative": "speak",
+                            "utterance": "speak",
+                            "statement": "speak",
+                            "interrogative": "speak",
+                            "question": "speak",
+                            "imperative": "speak",
+                            "exclamatory": "emote",
+                        }
+                        observed_mapped = _action_map.get(observed_action, "speak")
+                        s.mental_simulator.update_model(
+                            agent_id=_speaker_key,
+                            observed_action=observed_mapped,
+                            discourse_frames=_discourse_frames_dicts or None,
+                            context={
+                                "content": content,
+                                "sentiment": nlu_result.get("sentiment", {}),
+                            },
+                            cycle_id=cycle_id,
+                        )
+                        if _session_uid and role == "conversant":
+                            _st_ix = s.interlocutor_model.speakers.get(_speaker_key)
+                            if _st_ix is not None and _st_ix.interaction_count == 1:
+                                if not s.get_user_display_name(_session_uid):
+                                    _first_encounter_asks_name = True
+                    interlocutor_snapshot = s.interlocutor_model.get_model_summary(_speaker_key)
+                    _mental_prediction = s.mental_simulator.predict_behavior(_speaker_key)
+                    interlocutor_snapshot["mental_prediction"] = _mental_prediction
+                    episode.bind_theory_of_mind(interlocutor_snapshot)
 
             _st = _step_time("1.7-interlocutor")
 
@@ -1007,6 +1232,9 @@ class PersonaAgent(BaseAgent):
             self._yield_after_cycle_if_input_pipeline_busy()
             return
 
+        if cognitive_phases_enabled():
+            yield COGNITIVE_PHASE_NEURAL_GATE
+
         # -- 2. Semantic recall (budget-aware) -------------------------
         query_tags = symbolic_input.get("tags", [])
         if isinstance(query_tags, list) and isinstance(tags, list):
@@ -1024,7 +1252,7 @@ class PersonaAgent(BaseAgent):
         if (
             _trueself_agent
             and role == "conversant"
-            and _src_lc == "user"
+            and _user_or_traced_turn
             and not is_internal
         ):
             _rl_raw = str(os.environ.get("HAROMA_TRUESELF_USER_CHAT_RECALL_LIMIT", "12") or "").strip()
@@ -1035,42 +1263,58 @@ class PersonaAgent(BaseAgent):
                     _rl_cap = 12
                 if _rl_cap > 0:
                     recall_limit = min(recall_limit, _rl_cap)
-        recalled = s.memory.recall(
-            query_tags=query_tags,
-            limit=recall_limit,
-            query_text=query_text,
-        )
-        recalled = s.memory.merge_recall_with_prime(
-            recalled, recall_limit, fast_cycle=False
-        )
-        if has_external and should_merge_web_learn(
-            query_text, nlu_result or {}, teaching=_teaching
+        if skip_semantic_recall_for_internal(is_internal, s):
+            recalled = []
+        elif (
+            _ts_http_fast
+            and not is_internal
+            and env_flag("HAROMA_TRUESELF_USER_CHAT_FAST_RECALL", True)
+            and hasattr(s.memory, "recall_fast")
         ):
-            _wlim = web_learn_inject_max()
-            if _wlim > 0:
-                recalled = merge_web_learn_tail(
-                    s.memory, recalled, recall_limit, max_inject=_wlim
-                )
-        if not input_pipeline_busy(s, getattr(self, "_boot_agent", None)):
-            try:
-                auto_nodes = s.memory.get_nodes("thought_tree", "autonomy")
-                tail = auto_nodes[-4:] if len(auto_nodes) > 4 else auto_nodes
-                if tail:
-                    seen = {n.moment_id for n in recalled}
-                    prefix = [n for n in reversed(tail) if n.moment_id not in seen]
-                    if prefix:
-                        recalled = (prefix + list(recalled))[:recall_limit]
-                        try:
-                            s.autonomy_bump("recall_autonomy_injected", len(prefix))
-                        except Exception as _ab:
-                            print(
-                                f"[Persona:{self.agent_id}] autonomy_bump error: {_ab}",
-                                flush=True,
-                            )
-            except Exception as _ar:
-                print(
-                    f"[Persona:{self.agent_id}] autonomy recall merge error: {_ar}", flush=True
-                )
+            # Full ``recall()`` hybrid path can take 10s+ on large forests (51k+ nodes);
+            # FAISS-only ``recall_fast`` keeps HTTP /chat under the user-chat budget.
+            _rf_lim = max(1, min(recall_limit, 8))
+            recalled = s.memory.recall_fast(query_text or "", limit=_rf_lim)
+            recalled = s.memory.merge_recall_with_prime(
+                recalled, _rf_lim, fast_cycle=True
+            )
+        else:
+            recalled = s.memory.recall(
+                query_tags=query_tags,
+                limit=recall_limit,
+                query_text=query_text,
+            )
+            recalled = s.memory.merge_recall_with_prime(
+                recalled, recall_limit, fast_cycle=False
+            )
+            if has_external and should_merge_web_learn(
+                query_text, nlu_result or {}, teaching=_teaching
+            ):
+                _wlim = web_learn_inject_max()
+                if _wlim > 0:
+                    recalled = merge_web_learn_tail(
+                        s.memory, recalled, recall_limit, max_inject=_wlim
+                    )
+            if not input_pipeline_busy(s, getattr(self, "_boot_agent", None)):
+                try:
+                    auto_nodes = s.memory.get_nodes("thought_tree", "autonomy")
+                    tail = auto_nodes[-4:] if len(auto_nodes) > 4 else auto_nodes
+                    if tail:
+                        seen = {n.moment_id for n in recalled}
+                        prefix = [n for n in reversed(tail) if n.moment_id not in seen]
+                        if prefix:
+                            recalled = (prefix + list(recalled))[:recall_limit]
+                            try:
+                                s.autonomy_bump("recall_autonomy_injected", len(prefix))
+                            except Exception as _ab:
+                                print(
+                                    f"[Persona:{self.agent_id}] autonomy_bump error: {_ab}",
+                                    flush=True,
+                                )
+                except Exception as _ar:
+                    print(
+                        f"[Persona:{self.agent_id}] autonomy recall merge error: {_ar}", flush=True
+                    )
         episode.bind_memories(recalled)
 
         # LLM-centric / board goal-voice: consult packed LLM only when there is
@@ -1386,7 +1630,10 @@ class PersonaAgent(BaseAgent):
                 ],
                 "drives": (drive_state if isinstance(drive_state, dict) else {}),
             }
-        if _seed_enabled and hasattr(s.memory, "build_seed_context"):
+        _skip_ts_seed = _ts_http_fast and env_flag(
+            "HAROMA_TRUESELF_USER_CHAT_SKIP_MEMORY_SEED", True
+        )
+        if _seed_enabled and hasattr(s.memory, "build_seed_context") and not _skip_ts_seed:
             try:
                 _memory_forest_seed = s.memory.build_seed_context(
                     query_text=query_text or "",
@@ -1401,7 +1648,10 @@ class PersonaAgent(BaseAgent):
 
         # -- 11-12. Reflect + diagnose ---------------------------------
         drift_score = 0.0
-        if _gate_decisions.get("reflection_diagnose", True):
+        _skip_ts_reflect = _ts_http_fast and env_flag(
+            "HAROMA_TRUESELF_USER_CHAT_SKIP_REFLECT", True
+        )
+        if _gate_decisions.get("reflection_diagnose", True) and not _skip_ts_reflect:
             summary = s.reflector.reflect_on_state({"content": text, "tags": tags}, role)
             s.loop.log_loop("cognitive_cycle", context=summary, event="start")
             drift_result = s.drift.detect_drift(self._collect_recent_ids(limit=10))
@@ -1431,7 +1681,14 @@ class PersonaAgent(BaseAgent):
 
         # -- 13.2. Reasoning (skippable) -------------------------------
         reasoning_result = run_reasoning_phase(
-            enabled=(_gate_decisions.get("reasoning", True) and not _over_budget()),
+            enabled=(
+                _gate_decisions.get("reasoning", True)
+                and not _over_budget()
+                and not (
+                    _ts_http_fast
+                    and env_flag("HAROMA_TRUESELF_USER_CHAT_SKIP_REASONING", True)
+                )
+            ),
             reasoning_engine=s.reasoning,
             knowledge=s.knowledge,
             active_goals=active_goals,
@@ -1527,7 +1784,7 @@ class PersonaAgent(BaseAgent):
         if (
             _llm_ctx_enabled
             and _trueself_agent
-            and _src_lc == "user"
+            and _user_or_traced_turn
             and not is_internal
         ):
             _ts_llm = str(os.environ.get("HAROMA_TRUESELF_USER_CHAT_LLM_TIMEOUT_SEC", "") or "").strip()
@@ -1597,7 +1854,10 @@ class PersonaAgent(BaseAgent):
             _discourse_llm = (_discourse_llm + " | " + _enc_hint) if _discourse_llm else _enc_hint
 
         _dum_raw = packed_llm_dummy_reply_raw()
-        log_chat_pipeline(
+        if cognitive_phases_enabled():
+            yield COGNITIVE_PHASE_PRE_LLM
+
+        log_input_pipeline(
             "persona.before_packed_llm",
             trace_id=_pipe_tid,
             detail=(
@@ -1633,7 +1893,10 @@ class PersonaAgent(BaseAgent):
             )
         finally:
             self._after_llm_context_io(_llm_ctx_enabled, role)
-        log_chat_pipeline("persona.after_packed_llm", trace_id=_pipe_tid)
+        log_input_pipeline("persona.after_packed_llm", trace_id=_pipe_tid)
+
+        if cognitive_phases_enabled():
+            yield COGNITIVE_PHASE_POST_LLM
 
         if _defer_llm_bind:
             _vals: Dict[str, Any] = {}
@@ -1658,407 +1921,409 @@ class PersonaAgent(BaseAgent):
             if hasattr(episode, "bind_llm_context"):
                 episode.bind_llm_context(llm_context_result)
 
-        # Fresh context manager: the first ``with _sync_ctx`` above already
-        # exited and exhausted that @contextmanager instance; re-entering it
-        # raises AttributeError on Python 3.12+.
-        _sync_ctx_post = (
-            s.neural_sync() if _trueself_traced_fast else s.persona_neural_section()
-        )
-        with _sync_ctx_post:
-            # -- 13.3. Counterfactual (skippable) --------------------------
-            counterfactual_result: Dict[str, Any] = {
-                "counterfactual_depth": 0,
-                "branches": [],
-            }
-            _cf_features: List[float] = []
-            if _gate_decisions.get("counterfactual", True) and not _over_budget():
-                _cf_features = build_counterfactual_gate_features(
-                    knowledge_diff=knowledge_diff,
-                    reasoning_result=reasoning_result,
-                    active_goals=active_goals,
-                    emotion_summary=emotion_summary,
-                    curiosity_result=curiosity_result,
-                    has_external=bool(has_external),
-                    cycle_count=cycle_id,
-                    counterfactual_engine=s.counterfactual,
-                    prev_modulation=self._prev_modulation,
-                )
-                counterfactual_result = run_counterfactual_phase(
-                    enabled=True,
-                    counterfactual_engine=s.counterfactual,
-                    knowledge_graph=s.knowledge,
-                    reasoning_engine=s.reasoning,
-                    reasoning_result=reasoning_result,
-                    knowledge_diff=knowledge_diff,
-                    active_goals=active_goals,
-                    nlu_result=nlu_result,
-                    episode=episode,
-                    gate_features=_cf_features,
-                    workspace=self.workspace,
-                    attention=s.attention,
-                    attention_ctx=attention_ctx,
-                    z_t=_z_t,
-                )
-
-            # -- 13.5. Metacognition (skippable) ---------------------------
-            episode.bind_reconciliation(self._last_reconcile_bus_payload)
-            meta_assessment, _ = run_metacognition_phase(
-                enabled=(_gate_decisions.get("metacognition", True) and not _over_budget()),
-                extended=False,
-                metacognition=s.metacognition,
-                episode=episode,
-                emotion_summary=emotion_summary,
-                curiosity_result=curiosity_result,
-                outcome_prev=self._prev_episode_payload.get("action_outcome", {}),
-            )
-
-            # -- 13.7. Imagination (skippable) -----------------------------
-            imagination_result, imagined_strategy, imagined_plan = run_imagination_phase(
-                enabled=(_gate_decisions.get("imagination", True) and not _over_budget()),
-                imagination=s.imagination,
-                episode=episode,
-                current_embedding=current_embedding,
-                emotion_summary=emotion_summary,
-                curiosity_result=curiosity_result,
-                dominant_drive=self._safe_drive_level(s.drives),
-                wm_load=self.working_memory.occupancy(),
-                outcome_prev=self._prev_outcome_score,
-                has_external=float(has_external),
-                active_goals=active_goals,
-                drive_state=drive_state,
-            )
-            if imagined_plan:
-                episode.bind_plan(imagined_plan)
-                if not self._current_plan:
-                    self._current_plan = list(imagined_plan)
-                    self._plan_step = 0
-            if imagined_strategy is None and _is_real_module(s.imagination):
-                try:
-                    imagined_strategy = s.imagination.get_strategy_recommendation()
-                except Exception as _isr:
-                    print(
-                        f"[Persona:{self.agent_id}] get_strategy_recommendation error: {_isr}",
-                        flush=True,
-                    )
-
-            # -- 14. Action generation -------------------------------------
-            _st = _step_time("13-curiosity+reasoning+cf+meta+imagination")
-
-            ctx_hash = s.action_memory._hash_context(episode.to_payload())
-            strategy_hint = resolve_strategy_hint(
-                s.action_memory.suggest_strategy(ctx_hash),
-                imagined_strategy,
-                self._current_plan,
-                self._plan_step,
-            )
-
-            ws_dicts = workspace_contents_as_dicts(self.workspace)
-            is_conv = self.conversation.is_in_conversation(cycle_id)
-            last_turn = self.conversation.get_last_input()
-            topic = self.conversation.get_topic()
-            topic_shifted = self.conversation.detect_topic_shift(symbolic_input.get("tags", []))
-
-            merge_derivation_artifacts(episode)
-
-            ep_payload, _kg_triples = build_action_episode_payload(
-                episode=episode,
-                current_embedding=current_embedding,
-                z_t=_z_t,
-                knowledge_graph=s.knowledge,
-                knowledge_summary=knowledge_summary,
-                nlu_result=nlu_result,
-                memory_forest=s.memory,
-            )
-
-            _novelty_bias = modulation.get("novelty_bias", 0.0)
-            _novelty_bias += ((self.personality.get("openness") or 0.5) - 0.5) * 0.2
-
-            _utter_style = "conversational" if role == "conversant" else None
-
-            _llm_answer = llm_context_result.get("answer")
-            _multi_goal = str(
-                os.environ.get("HAROMA_MULTI_GOAL_PER_CYCLE", "0") or "0",
-            ).strip().lower() in ("1", "true", "yes", "on")
-            try:
-                _max_cycle_goals = max(
-                    1,
-                    int(os.environ.get("HAROMA_MAX_CYCLE_GOALS", "3") or 3),
-                )
-            except (TypeError, ValueError):
-                _max_cycle_goals = 3
-            try:
-                _max_actions_per_goal = max(
-                    1,
-                    int(os.environ.get("HAROMA_MAX_ACTIONS_PER_GOAL", "2") or 2),
-                )
-            except (TypeError, ValueError):
-                _max_actions_per_goal = 2
-
-            if _llm_centric and _llm_answer:
-                action = {
-                    "text": str(_llm_answer).strip(),
-                    "action_type": "respond" if is_conv else "reflect",
-                    "strategy": "llm_context",
-                    "composition": None,
-                    "deliberation": {"candidates": [], "winner": "llm_centric"},
-                    "confidence": llm_context_result.get("confidence", 0.5),
-                    "reasoning": "llm_centric_direct",
-                    "law_bound": False,
-                    "symbolic_law": {"compliant": True, "violation_count": 0},
-                    "timestamp": time.time(),
-                }
-                episode.bind_multi_goal_actions([])
-            elif _multi_goal and active_goals:
-                _batch = active_goals[:_max_cycle_goals]
-                action, _mg_groups = run_multi_goal_deliberative_actions(
-                    episode=episode,
-                    action_generator=s.action_generator,
-                    ep_payload=ep_payload,
-                    goal_batch=_batch,
-                    max_actions_per_goal=_max_actions_per_goal,
-                    ws_dicts=ws_dicts,
-                    strategy_hint=strategy_hint,
-                    working_memory_context=self.working_memory.to_context_string(limit=4),
-                    conversation_context=self.conversation.get_context_summary(),
-                    is_in_conversation=is_conv,
-                    topic=topic,
-                    last_input_content=last_turn.content if last_turn else "",
-                    topic_shifted=topic_shifted,
-                    knowledge_summary=knowledge_summary,
-                    reasoning_result=reasoning_result,
-                    nlu_result=nlu_result,
-                    interlocutor=interlocutor_snapshot,
-                    counterfactual_result=counterfactual_result,
-                    novelty_bias=_novelty_bias,
-                    personality=personality_summary,
-                    utterance_style=_utter_style,
-                )
-                episode.bind_multi_goal_actions(_mg_groups)
-            else:
-                action = run_deliberative_action(
-                    episode=episode,
-                    action_generator=s.action_generator,
-                    ep_payload=ep_payload,
-                    ws_dicts=ws_dicts,
-                    strategy_hint=strategy_hint,
-                    working_memory_context=self.working_memory.to_context_string(limit=4),
-                    conversation_context=self.conversation.get_context_summary(),
-                    is_in_conversation=is_conv,
-                    topic=topic,
-                    last_input_content=last_turn.content if last_turn else "",
-                    topic_shifted=topic_shifted,
-                    knowledge_summary=knowledge_summary,
-                    reasoning_result=reasoning_result,
-                    nlu_result=nlu_result,
-                    interlocutor=interlocutor_snapshot,
-                    counterfactual_result=counterfactual_result,
-                    novelty_bias=_novelty_bias,
-                    personality=personality_summary,
-                    utterance_style=_utter_style,
-                )
-                episode.bind_multi_goal_actions([])
-
-            # Primary packed LLM already ran; do not let deliberative placeholder text win in
-            # ``resolve_chat_visible_text`` (it prefers non-empty ``action[\"text\"]`` before
-            # ``llm_context[\"answer\"]`` unless source matches the visibility branches).
-            if _llm_primary_path and not _llm_centric:
-                _plm_src = str(llm_context_result.get("source") or "").strip().lower()
-                _plm_ans = str(llm_context_result.get("answer") or "").strip()
-                if _plm_ans and _plm_src in ("llm_context_reasoning", "chat_only", "dummy_probe"):
-                    action = dict(action)
-                    action["text"] = _plm_ans
-                    action["strategy"] = "llm_context"
-
-            _st = _step_time("14-action_generation")
-
-            # -- 15. Evaluate outcome --------------------------------------
-            outcome = s.outcome_evaluator.evaluate(
-                action,
-                self._prev_episode_payload,
-                episode.to_payload(),
+        # Post-LLM phases: counterfactual → response run without holding the neural RW
+        # lock (short locks only for self_model / backbone / composer weight touches).
+        # -- 13.3. Counterfactual (skippable) --------------------------
+        counterfactual_result: Dict[str, Any] = {
+            "counterfactual_depth": 0,
+            "branches": [],
+        }
+        _cf_features: List[float] = []
+        if _gate_decisions.get("counterfactual", True) and not _over_budget():
+            _cf_features = build_counterfactual_gate_features(
                 knowledge_diff=knowledge_diff,
                 reasoning_result=reasoning_result,
+                active_goals=active_goals,
+                emotion_summary=emotion_summary,
+                curiosity_result=curiosity_result,
+                has_external=bool(has_external),
+                cycle_count=cycle_id,
+                counterfactual_engine=s.counterfactual,
+                prev_modulation=self._prev_modulation,
+            )
+            counterfactual_result = run_counterfactual_phase(
+                enabled=True,
+                counterfactual_engine=s.counterfactual,
+                knowledge_graph=s.knowledge,
+                reasoning_engine=s.reasoning,
+                reasoning_result=reasoning_result,
+                knowledge_diff=knowledge_diff,
+                active_goals=active_goals,
                 nlu_result=nlu_result,
-                counterfactual_result=counterfactual_result,
-            )
-            episode.bind_action(action, outcome)
-            s.action_memory.store(ctx_hash, action, outcome)
-            self.emotion.engine.learn_from_cycle(emotion_input)
-
-            # -- 15a. Plan step advancement (post-outcome, matches controller) -
-            _outcome_score = outcome.get("score", 0.5)
-            if self._current_plan:
-                self._plan_outcomes.append(_outcome_score)
-                self._plan_step += 1
-                if self._plan_step >= len(self._current_plan):
-                    self._current_plan = []
-                    self._plan_step = 0
-                    self._plan_outcomes = []
-                elif _outcome_score < 0.3:
-                    self._current_plan = []
-                    self._plan_step = 0
-                    self._plan_outcomes = []
-
-            # -- 15b. Nudge personality based on outcome --------------------
-            self._nudge_personality(
-                _outcome_score,
-                action.get("strategy", ""),
-                emotion_summary.get("intensity", 0.0),
-                emotion_summary.get("valence", 0.0),
+                episode=episode,
+                gate_features=_cf_features,
+                workspace=self.workspace,
+                attention=s.attention,
+                attention_ctx=attention_ctx,
+                z_t=_z_t,
             )
 
-            _st = _step_time("15-outcome_eval")
+        # -- 13.5. Metacognition (skippable) ---------------------------
+        episode.bind_reconciliation(self._last_reconcile_bus_payload)
+        meta_assessment, _ = run_metacognition_phase(
+            enabled=(_gate_decisions.get("metacognition", True) and not _over_budget()),
+            extended=False,
+            metacognition=s.metacognition,
+            episode=episode,
+            emotion_summary=emotion_summary,
+            curiosity_result=curiosity_result,
+            outcome_prev=self._prev_episode_payload.get("action_outcome", {}),
+        )
 
-            # -- 16. Consolidate memory (persona-specific branches) --------
-            salience = episode.compute_salience()
-            _exp_tags = query_tags + ["experience", f"persona:{self.agent_id}"]
-            if _user_tag:
-                _exp_tags = _exp_tags + [_user_tag]
-            experience_node = MemoryNode(
-                content=f"[cycle {cycle_id}] {episode.affect['dominant_emotion']} | {content[:80]}",
-                emotion=episode.affect["dominant_emotion"],
-                confidence=min(1.0, salience),
-                tags=_exp_tags,
-            )
-            s.memory.add_node("thought_tree", branch_name, experience_node)
-
-            _ut_reply = (content or text or "").strip()
-            _vis = self._chat_visible_response(
-                action,
-                user_text=_ut_reply,
-                identity=episode.identity,
-                llm_context=getattr(episode, "llm_context", None) or {},
-            )
-            _act_tags: List[str] = [
-                "action",
-                action.get("action_type", "respond"),
-                action.get("strategy", "unknown"),
-                f"persona:{self.agent_id}",
-                (
-                    "learning:user_turn"
-                    if is_conv and role == "conversant"
-                    else "learning:internal"
-                ),
-            ]
-            if _user_tag:
-                _act_tags.append(_user_tag)
-            action_node = MemoryNode(
-                content=_vis[:120],
-                emotion=episode.affect["dominant_emotion"],
-                confidence=outcome.get("score", 0.5),
-                tags=_act_tags,
-            )
-            s.memory.add_node("action_tree", branch_name, action_node)
-
-            # -- 16b. Post-turn forest touch + cited-node bump -------------
-            _touch_policy = os.environ.get("HAROMA_MEMORY_TOUCH_POLICY", "recalled_plus_core")
-            if _touch_policy != "off" and hasattr(s.memory, "touch_trees_after_turn"):
-                _recalled_tree_names: Set[str] = set()
-                for _rn in episode.recalled_memories:
-                    _tn = _rn.get("tree") if isinstance(_rn, dict) else getattr(_rn, "tree", None)
-                    if _tn:
-                        _recalled_tree_names.add(_tn)
-                try:
-                    s.memory.touch_trees_after_turn(
-                        cycle_id=cycle_id,
-                        branch_name=branch_name,
-                        summary=(content or "")[:100],
-                        emotion=episode.affect.get("dominant_emotion", ""),
-                        outcome_score=outcome.get("score", 0.5),
-                        recalled_tree_names=_recalled_tree_names,
-                        policy=_touch_policy,
-                    )
-                except Exception as _touch_err:
-                    print(
-                        f"[Persona:{self.agent_id}] forest touch error: {_touch_err}",
-                        flush=True,
-                    )
-
-            _cited = llm_context_result.get("cited_memories", [])
-            if _cited and hasattr(s.memory, "bump_cited_nodes"):
-                _mids = []
-                for _cm in _cited:
-                    if isinstance(_cm, str):
-                        _mids.append(_cm)
-                    elif isinstance(_cm, int):
-                        rm = episode.recalled_memories
-                        if 0 <= _cm < len(rm):
-                            _mid = (
-                                rm[_cm].get("moment_id")
-                                if isinstance(rm[_cm], dict)
-                                else getattr(rm[_cm], "moment_id", None)
-                            )
-                            if _mid:
-                                _mids.append(_mid)
-                if _mids:
-                    try:
-                        s.memory.bump_cited_nodes(_mids)
-                    except Exception as _bump_err:
-                        print(
-                            f"[Persona:{self.agent_id}] bump cited error: {_bump_err}",
-                            flush=True,
-                        )
-
-            # -- 16c. LLM-centric environment feedback -------------------------
-            if _llm_centric:
-                _env_upd = llm_context_result.get("env_updates", {})
-                if _env_upd:
-                    try:
-                        self._apply_llm_env_updates(_env_upd, s, cycle_id, branch_name)
-                    except Exception as _eu_err:
-                        print(
-                            f"[Persona:{self.agent_id}] env update error: {_eu_err}",
-                            flush=True,
-                        )
-
-            # -- 16d. Deliberative: apply chosen action's impacts -----------
-            _d_apply = (
-                str(
-                    os.environ.get("HAROMA_DELIBERATIVE_APPLY", "1") or "1",
+        # -- 13.7. Imagination (skippable) -----------------------------
+        imagination_result, imagined_strategy, imagined_plan = run_imagination_phase(
+            enabled=(_gate_decisions.get("imagination", True) and not _over_budget()),
+            imagination=s.imagination,
+            episode=episode,
+            current_embedding=current_embedding,
+            emotion_summary=emotion_summary,
+            curiosity_result=curiosity_result,
+            dominant_drive=self._safe_drive_level(s.drives),
+            wm_load=self.working_memory.occupancy(),
+            outcome_prev=self._prev_outcome_score,
+            has_external=float(has_external),
+            active_goals=active_goals,
+            drive_state=drive_state,
+        )
+        if imagined_plan:
+            episode.bind_plan(imagined_plan)
+            if not self._current_plan:
+                self._current_plan = list(imagined_plan)
+                self._plan_step = 0
+        if imagined_strategy is None and _is_real_module(s.imagination):
+            try:
+                imagined_strategy = s.imagination.get_strategy_recommendation()
+            except Exception as _isr:
+                print(
+                    f"[Persona:{self.agent_id}] get_strategy_recommendation error: {_isr}",
+                    flush=True,
                 )
-                .strip()
-                .lower()
-            )
-            if (
-                _d_apply in ("1", "true", "yes", "on")
-                and deliberative_flag
-                and llm_context_result.get("chosen_action")
-            ):
-                try:
-                    self._apply_deliberative_consequences(
-                        llm_context_result["chosen_action"],
-                        s,
-                        cycle_id,
-                        outcome_score=float(outcome.get("score", 0.5) or 0.5),
-                    )
-                except Exception as _dac_err:
-                    print(
-                        f"[Persona:{self.agent_id}] deliberative apply error: {_dac_err}",
-                        flush=True,
-                    )
 
-            s.temporal.record(episode.to_summary())
+        # -- 14. Action generation -------------------------------------
+        _st = _step_time("13-curiosity+reasoning+cf+meta+imagination")
 
-            # -- Self-model compare + training ------------------------------
-            _ws_for_self = self.workspace.get_contents()
-            _attn_win = (
-                _ws_for_self[0].source
-                if _ws_for_self and hasattr(_ws_for_self[0], "source")
-                else (
-                    _ws_for_self[0].get("source", "perception")
-                    if _ws_for_self and isinstance(_ws_for_self[0], dict)
-                    else "perception"
-                )
+        ctx_hash = s.action_memory._hash_context(episode.to_payload())
+        strategy_hint = resolve_strategy_hint(
+            s.action_memory.suggest_strategy(ctx_hash),
+            imagined_strategy,
+            self._current_plan,
+            self._plan_step,
+        )
+
+        ws_dicts = workspace_contents_as_dicts(self.workspace)
+        is_conv = self.conversation.is_in_conversation(cycle_id)
+        last_turn = self.conversation.get_last_input()
+        topic = self.conversation.get_topic()
+        topic_shifted = self.conversation.detect_topic_shift(symbolic_input.get("tags", []))
+
+        merge_derivation_artifacts(episode)
+
+        ep_payload, _kg_triples = build_action_episode_payload(
+            episode=episode,
+            current_embedding=current_embedding,
+            z_t=_z_t,
+            knowledge_graph=s.knowledge,
+            knowledge_summary=knowledge_summary,
+            nlu_result=nlu_result,
+            memory_forest=s.memory,
+        )
+
+        _novelty_bias = modulation.get("novelty_bias", 0.0)
+        _novelty_bias += ((self.personality.get("openness") or 0.5) - 0.5) * 0.2
+
+        _utter_style = "conversational" if role == "conversant" else None
+
+        _llm_answer = llm_context_result.get("answer")
+        _multi_goal = str(
+            os.environ.get("HAROMA_MULTI_GOAL_PER_CYCLE", "0") or "0",
+        ).strip().lower() in ("1", "true", "yes", "on")
+        try:
+            _max_cycle_goals = max(
+                1,
+                int(os.environ.get("HAROMA_MAX_CYCLE_GOALS", "3") or 3),
             )
-            actual_self_state = {
-                "valence": emotion_summary.get("valence", 0.0),
-                "arousal": emotion_summary.get("arousal", 0.0),
-                "curiosity": curiosity_result.get("curiosity_score", 0.0),
-                "strategy": action.get("strategy", "reflect"),
-                "attention_winner": _attn_win,
+        except (TypeError, ValueError):
+            _max_cycle_goals = 3
+        try:
+            _max_actions_per_goal = max(
+                1,
+                int(os.environ.get("HAROMA_MAX_ACTIONS_PER_GOAL", "2") or 2),
+            )
+        except (TypeError, ValueError):
+            _max_actions_per_goal = 2
+
+        if _llm_centric and _llm_answer:
+            action = {
+                "text": str(_llm_answer).strip(),
+                "action_type": "respond" if is_conv else "reflect",
+                "strategy": "llm_context",
+                "composition": None,
+                "deliberation": {"candidates": [], "winner": "llm_centric"},
+                "confidence": llm_context_result.get("confidence", 0.5),
+                "reasoning": "llm_centric_direct",
+                "law_bound": False,
+                "symbolic_law": {"compliant": True, "violation_count": 0},
+                "timestamp": time.time(),
             }
-            self_surprise: Dict[str, Any] = {}
-            if self_prediction:
+            episode.bind_multi_goal_actions([])
+        elif _multi_goal and active_goals:
+            _batch = active_goals[:_max_cycle_goals]
+            action, _mg_groups = run_multi_goal_deliberative_actions(
+                episode=episode,
+                action_generator=s.action_generator,
+                ep_payload=ep_payload,
+                goal_batch=_batch,
+                max_actions_per_goal=_max_actions_per_goal,
+                ws_dicts=ws_dicts,
+                strategy_hint=strategy_hint,
+                working_memory_context=self.working_memory.to_context_string(limit=4),
+                conversation_context=self.conversation.get_context_summary(),
+                is_in_conversation=is_conv,
+                topic=topic,
+                last_input_content=last_turn.content if last_turn else "",
+                topic_shifted=topic_shifted,
+                knowledge_summary=knowledge_summary,
+                reasoning_result=reasoning_result,
+                nlu_result=nlu_result,
+                interlocutor=interlocutor_snapshot,
+                counterfactual_result=counterfactual_result,
+                novelty_bias=_novelty_bias,
+                personality=personality_summary,
+                utterance_style=_utter_style,
+            )
+            episode.bind_multi_goal_actions(_mg_groups)
+        else:
+            action = run_deliberative_action(
+                episode=episode,
+                action_generator=s.action_generator,
+                ep_payload=ep_payload,
+                ws_dicts=ws_dicts,
+                strategy_hint=strategy_hint,
+                working_memory_context=self.working_memory.to_context_string(limit=4),
+                conversation_context=self.conversation.get_context_summary(),
+                is_in_conversation=is_conv,
+                topic=topic,
+                last_input_content=last_turn.content if last_turn else "",
+                topic_shifted=topic_shifted,
+                knowledge_summary=knowledge_summary,
+                reasoning_result=reasoning_result,
+                nlu_result=nlu_result,
+                interlocutor=interlocutor_snapshot,
+                counterfactual_result=counterfactual_result,
+                novelty_bias=_novelty_bias,
+                personality=personality_summary,
+                utterance_style=_utter_style,
+            )
+            episode.bind_multi_goal_actions([])
+
+        # Primary packed LLM already ran; do not let deliberative placeholder text win in
+        # ``resolve_chat_visible_text`` (it prefers non-empty ``action[\"text\"]`` before
+        # ``llm_context[\"answer\"]`` unless source matches the visibility branches).
+        if _llm_primary_path and not _llm_centric:
+            _plm_src = str(llm_context_result.get("source") or "").strip().lower()
+            _plm_ans = str(llm_context_result.get("answer") or "").strip()
+            if _plm_ans and _plm_src in (
+                "llm_context_reasoning",
+                "chat_only",
+                "dummy_probe",
+                "llm_nonjson_reply",
+            ):
+                action = dict(action)
+                action["text"] = _plm_ans
+                action["strategy"] = "llm_context"
+
+        _st = _step_time("14-action_generation")
+
+        # -- 15. Evaluate outcome --------------------------------------
+        outcome = s.outcome_evaluator.evaluate(
+            action,
+            self._prev_episode_payload,
+            episode.to_payload(),
+            knowledge_diff=knowledge_diff,
+            reasoning_result=reasoning_result,
+            nlu_result=nlu_result,
+            counterfactual_result=counterfactual_result,
+        )
+        episode.bind_action(action, outcome)
+        s.action_memory.store(ctx_hash, action, outcome)
+        self.emotion.engine.learn_from_cycle(emotion_input)
+
+        # -- 15a. Plan step advancement (post-outcome, matches controller) -
+        _outcome_score = outcome.get("score", 0.5)
+        if self._current_plan:
+            self._plan_outcomes.append(_outcome_score)
+            self._plan_step += 1
+            if self._plan_step >= len(self._current_plan):
+                self._current_plan = []
+                self._plan_step = 0
+                self._plan_outcomes = []
+            elif _outcome_score < 0.3:
+                self._current_plan = []
+                self._plan_step = 0
+                self._plan_outcomes = []
+
+        # -- 15b. Nudge personality based on outcome --------------------
+        self._nudge_personality(
+            _outcome_score,
+            action.get("strategy", ""),
+            emotion_summary.get("intensity", 0.0),
+            emotion_summary.get("valence", 0.0),
+        )
+
+        _st = _step_time("15-outcome_eval")
+
+        # -- 16. Consolidate memory (persona-specific branches) --------
+        salience = episode.compute_salience()
+        _exp_tags = query_tags + ["experience", f"persona:{self.agent_id}"]
+        if _user_tag:
+            _exp_tags = _exp_tags + [_user_tag]
+        experience_node = MemoryNode(
+            content=f"[cycle {cycle_id}] {episode.affect['dominant_emotion']} | {content[:80]}",
+            emotion=episode.affect["dominant_emotion"],
+            confidence=min(1.0, salience),
+            tags=_exp_tags,
+        )
+        s.memory.add_node("thought_tree", branch_name, experience_node)
+
+        _ut_reply = (content or text or "").strip()
+        _vis = self._chat_visible_response(
+            action,
+            user_text=_ut_reply,
+            identity=episode.identity,
+            llm_context=getattr(episode, "llm_context", None) or {},
+        )
+        _act_tags: List[str] = [
+            "action",
+            action.get("action_type", "respond"),
+            action.get("strategy", "unknown"),
+            f"persona:{self.agent_id}",
+            (
+                "learning:user_turn"
+                if is_conv and role == "conversant"
+                else "learning:internal"
+            ),
+        ]
+        if _user_tag:
+            _act_tags.append(_user_tag)
+        action_node = MemoryNode(
+            content=_vis[:120],
+            emotion=episode.affect["dominant_emotion"],
+            confidence=outcome.get("score", 0.5),
+            tags=_act_tags,
+        )
+        s.memory.add_node("action_tree", branch_name, action_node)
+
+        # -- 16b. Post-turn forest touch + cited-node bump -------------
+        _touch_policy = os.environ.get("HAROMA_MEMORY_TOUCH_POLICY", "recalled_plus_core")
+        if _touch_policy != "off" and hasattr(s.memory, "touch_trees_after_turn"):
+            _recalled_tree_names: Set[str] = set()
+            for _rn in episode.recalled_memories:
+                _tn = _rn.get("tree") if isinstance(_rn, dict) else getattr(_rn, "tree", None)
+                if _tn:
+                    _recalled_tree_names.add(_tn)
+            try:
+                s.memory.touch_trees_after_turn(
+                    cycle_id=cycle_id,
+                    branch_name=branch_name,
+                    summary=(content or "")[:100],
+                    emotion=episode.affect.get("dominant_emotion", ""),
+                    outcome_score=outcome.get("score", 0.5),
+                    recalled_tree_names=_recalled_tree_names,
+                    policy=_touch_policy,
+                )
+            except Exception as _touch_err:
+                print(
+                    f"[Persona:{self.agent_id}] forest touch error: {_touch_err}",
+                    flush=True,
+                )
+
+        _cited = llm_context_result.get("cited_memories", [])
+        if _cited and hasattr(s.memory, "bump_cited_nodes"):
+            _mids = []
+            for _cm in _cited:
+                if isinstance(_cm, str):
+                    _mids.append(_cm)
+                elif isinstance(_cm, int):
+                    rm = episode.recalled_memories
+                    if 0 <= _cm < len(rm):
+                        _mid = (
+                            rm[_cm].get("moment_id")
+                            if isinstance(rm[_cm], dict)
+                            else getattr(rm[_cm], "moment_id", None)
+                        )
+                        if _mid:
+                            _mids.append(_mid)
+            if _mids:
+                try:
+                    s.memory.bump_cited_nodes(_mids)
+                except Exception as _bump_err:
+                    print(
+                        f"[Persona:{self.agent_id}] bump cited error: {_bump_err}",
+                        flush=True,
+                    )
+
+        # -- 16c. LLM-centric environment feedback -------------------------
+        if _llm_centric:
+            _env_upd = llm_context_result.get("env_updates", {})
+            if _env_upd:
+                try:
+                    self._apply_llm_env_updates(_env_upd, s, cycle_id, branch_name)
+                except Exception as _eu_err:
+                    print(
+                        f"[Persona:{self.agent_id}] env update error: {_eu_err}",
+                        flush=True,
+                    )
+
+        # -- 16d. Deliberative: apply chosen action's impacts -----------
+        _d_apply = (
+            str(
+                os.environ.get("HAROMA_DELIBERATIVE_APPLY", "1") or "1",
+            )
+            .strip()
+            .lower()
+        )
+        if (
+            _d_apply in ("1", "true", "yes", "on")
+            and deliberative_flag
+            and llm_context_result.get("chosen_action")
+        ):
+            try:
+                self._apply_deliberative_consequences(
+                    llm_context_result["chosen_action"],
+                    s,
+                    cycle_id,
+                    outcome_score=float(outcome.get("score", 0.5) or 0.5),
+                )
+            except Exception as _dac_err:
+                print(
+                    f"[Persona:{self.agent_id}] deliberative apply error: {_dac_err}",
+                    flush=True,
+                )
+
+        s.temporal.record(episode.to_summary())
+
+        # -- Self-model compare + training ------------------------------
+        _ws_for_self = self.workspace.get_contents()
+        _attn_win = (
+            _ws_for_self[0].source
+            if _ws_for_self and hasattr(_ws_for_self[0], "source")
+            else (
+                _ws_for_self[0].get("source", "perception")
+                if _ws_for_self and isinstance(_ws_for_self[0], dict)
+                else "perception"
+            )
+        )
+        actual_self_state = {
+            "valence": emotion_summary.get("valence", 0.0),
+            "arousal": emotion_summary.get("arousal", 0.0),
+            "curiosity": curiosity_result.get("curiosity_score", 0.0),
+            "strategy": action.get("strategy", "reflect"),
+            "attention_winner": _attn_win,
+        }
+        self_surprise: Dict[str, Any] = {}
+        if self_prediction:
+            _sync_sm = s.neural_sync() if _trueself_traced_fast else s.persona_neural_section()
+            with _sync_sm:
                 self_surprise = s.self_model.compare(self_prediction, actual_self_state)
                 episode.bind_self_surprise(self_surprise)
                 if current_embedding is not None:
@@ -2075,61 +2340,68 @@ class PersonaAgent(BaseAgent):
                         )
                     except Exception:
                         pass
-            self._prev_cycle_state = actual_self_state
-            self._prev_self_surprise = self_surprise
+        self._prev_cycle_state = actual_self_state
+        self._prev_self_surprise = self_surprise
 
-            # -- Integrative brain-like state + outcome-grounded beliefs (post-surprise)
-            try:
-                _pe = float(curiosity_result.get("prediction_error", 0.0) or 0.0)
-                _bs = compute_brain_like_state(
-                    affect=episode.affect,
-                    curiosity=dict(episode.curiosity) if hasattr(episode, "curiosity") else {},
-                    drives=episode.drives if isinstance(episode.drives, dict) else {},
-                    dominant_drive=str(episode.dominant_drive or ""),
-                    embodied_modulation=modulation if isinstance(modulation, dict) else {},
-                    self_surprise=self_surprise if isinstance(self_surprise, dict) else {},
-                    appraisal=appraisal_result if isinstance(appraisal_result, dict) else {},
-                    drift_score=float(episode.drift_score or 0.0),
-                    prediction_error=_pe,
-                )
-                episode.bind_brain_like_state(_bs)
-                maybe_log_brain_state(self.agent_id, _bs)
-                apply_outcome_grounded_belief_updates(
-                    memory=s.memory,
-                    outcome=outcome,
-                    reasoning_result=reasoning_result,
-                    llm_context=llm_context_result if isinstance(llm_context_result, dict) else {},
-                    cycle_id=cycle_id,
-                    branch_name=branch_name,
-                    agent_id=self.agent_id,
-                    plasticity_index=float(_bs.get("plasticity_index", 0.5) or 0.5),
-                )
-            except Exception as _brain_err:
-                print(
-                    f"[Persona:{self.agent_id}] brain_state / outcome_belief error: {_brain_err}",
-                    flush=True,
-                )
+        # -- Integrative brain-like state + outcome-grounded beliefs (post-surprise)
+        try:
+            _pe = float(curiosity_result.get("prediction_error", 0.0) or 0.0)
+            _bs = compute_brain_like_state(
+                affect=episode.affect,
+                curiosity=dict(episode.curiosity) if hasattr(episode, "curiosity") else {},
+                drives=episode.drives if isinstance(episode.drives, dict) else {},
+                dominant_drive=str(episode.dominant_drive or ""),
+                embodied_modulation=modulation if isinstance(modulation, dict) else {},
+                self_surprise=self_surprise if isinstance(self_surprise, dict) else {},
+                appraisal=appraisal_result if isinstance(appraisal_result, dict) else {},
+                drift_score=float(episode.drift_score or 0.0),
+                prediction_error=_pe,
+            )
+            episode.bind_brain_like_state(_bs)
+            maybe_log_brain_state(self.agent_id, _bs)
+            apply_outcome_grounded_belief_updates(
+                memory=s.memory,
+                outcome=outcome,
+                reasoning_result=reasoning_result,
+                llm_context=llm_context_result if isinstance(llm_context_result, dict) else {},
+                cycle_id=cycle_id,
+                branch_name=branch_name,
+                agent_id=self.agent_id,
+                plasticity_index=float(_bs.get("plasticity_index", 0.5) or 0.5),
+            )
+        except Exception as _brain_err:
+            print(
+                f"[Persona:{self.agent_id}] brain_state / outcome_belief error: {_brain_err}",
+                flush=True,
+            )
 
-            # -- Update narrative buffer -------------------------------------
-            _narr_emotion = episode.affect.get("dominant_emotion", "neutral")
-            _narr_salience = episode.compute_salience()
-            if _narr_salience > 0.3 or _narr_emotion != "neutral":
-                self._narrative_buffer.append(
-                    f"[{_narr_emotion}] {(content or text or 'silence')[:60]}"
-                )
-                if len(self._narrative_buffer) > self._max_narrative_length:
-                    self._narrative_buffer = self._narrative_buffer[-self._max_narrative_length :]
+        # -- Update narrative buffer -------------------------------------
+        _narr_emotion = episode.affect.get("dominant_emotion", "neutral")
+        _narr_salience = episode.compute_salience()
+        if _narr_salience > 0.3 or _narr_emotion != "neutral":
+            self._narrative_buffer.append(
+                f"[{_narr_emotion}] {(content or text or 'silence')[:60]}"
+            )
+            if len(self._narrative_buffer) > self._max_narrative_length:
+                self._narrative_buffer = self._narrative_buffer[-self._max_narrative_length :]
 
-            # -- Update per-persona state ----------------------------------
-            self._prev_episode_payload = episode.to_payload()
-            self._prev_episode_payload["_timestamp"] = time.time()
-            self._prev_outcome_score = outcome.get("score", 0.0)
-            self._prev_modulation = modulation
+        # -- Update per-persona state ----------------------------------
+        self._prev_episode_payload = episode.to_payload()
+        self._prev_episode_payload["_timestamp"] = time.time()
+        self._prev_outcome_score = outcome.get("score", 0.0)
+        self._prev_modulation = modulation
 
-            if is_conv:
-                self.conversation.record_response(_vis, cycle_id)
+        if is_conv:
+            self.conversation.record_response(_vis, cycle_id)
 
-            # -- Record outcome signals for BackgroundAgent training -------
+        # -- Record outcome signals for BackgroundAgent training -------
+        # Several brief neural reads (split so no single hold stacks every module).
+        _outcome_score_fb = float(outcome.get("score", 0.0))
+
+        def _record_plock():
+            return s.neural_sync() if _trueself_traced_fast else s.persona_neural_section()
+
+        with _record_plock():
             s.appraisal.record_outcome(
                 appraisal_result.get("_raw_features") or [],
                 actual_emotion=episode.affect["dominant_emotion"],
@@ -2145,8 +2417,7 @@ class PersonaAgent(BaseAgent):
                 z_t=_z_t,
             )
 
-            _outcome_score_fb = float(outcome.get("score", 0.0))
-
+        with _record_plock():
             if _is_real_module(getattr(s, "process_gate", None)):
                 try:
                     s.process_gate.record_outcome(
@@ -2179,6 +2450,7 @@ class PersonaAgent(BaseAgent):
                 except Exception:
                     pass
 
+        with _record_plock():
             _bb_mod = getattr(s, "backbone", None)
             if _is_real_module(_bb_mod) and _bb_snapshot is not None:
                 try:
@@ -2205,6 +2477,7 @@ class PersonaAgent(BaseAgent):
                 except Exception:
                     pass
 
+        with _record_plock():
             if _is_real_module(getattr(s, "counterfactual", None)) and _cf_features:
                 try:
                     _cf_val = outcome.get("breakdown", {}).get("counterfactual_value")
@@ -2220,89 +2493,91 @@ class PersonaAgent(BaseAgent):
                 except Exception:
                     pass
 
-            # -- Record LLM context reasoning outcome for reward model ------
-            if llm_context_result.get("source") == "llm_context_reasoning" and _is_real_module(
-                getattr(s, "llm_backend", None)
-            ):
-                _lc_answer = llm_context_result.get("answer") or ""
-                _lc_input = text or content or ""
-                if _lc_answer and _lc_input:
-                    _lc_reward = float(outcome.get("score", 0.5) or 0.5)
-                    if action.get("strategy") == "llm_context":
-                        _lc_reward = min(1.0, _lc_reward + 0.1)
+        # -- Record LLM context reasoning outcome for reward model ------
+        if llm_context_result.get("source") == "llm_context_reasoning" and _is_real_module(
+            getattr(s, "llm_backend", None)
+        ):
+            _lc_answer = llm_context_result.get("answer") or ""
+            _lc_input = text or content or ""
+            if _lc_answer and _lc_input:
+                _lc_reward = float(outcome.get("score", 0.5) or 0.5)
+                if action.get("strategy") == "llm_context":
+                    _lc_reward = min(1.0, _lc_reward + 0.1)
+                try:
+                    from mind.alignment_training import (
+                        compute_blended_alignment_reward,
+                        log_alignment_event,
+                    )
+
+                    _blended, _diag = compute_blended_alignment_reward(
+                        _lc_reward,
+                        llm_context_result,
+                        episode=episode,
+                    )
+                    _meta = {
+                        "alignment_training": True,
+                        "outcome_score_raw": _lc_reward,
+                        "alignment": _diag,
+                    }
                     try:
-                        from mind.alignment_training import (
-                            compute_blended_alignment_reward,
-                            log_alignment_event,
+                        from mind.environment_prompt_budgets import (
+                            PERSONA_ALIGNMENT_ENV_SUMMARY_MAX_CHARS,
                         )
 
-                        _blended, _diag = compute_blended_alignment_reward(
-                            _lc_reward,
-                            llm_context_result,
-                            episode=episode,
-                        )
-                        _meta = {
-                            "alignment_training": True,
-                            "outcome_score_raw": _lc_reward,
-                            "alignment": _diag,
-                        }
-                        try:
-                            from mind.environment_prompt_budgets import (
-                                PERSONA_ALIGNMENT_ENV_SUMMARY_MAX_CHARS,
+                        _ae = episode.environment_for_training_metadata()
+                        if _ae:
+                            _meta["agent_environment"] = _ae
+                            from mind.environment_context import (
+                                environment_summary_for_prompt,
                             )
 
-                            _ae = episode.environment_for_training_metadata()
-                            if _ae:
-                                _meta["agent_environment"] = _ae
-                                from mind.environment_context import (
-                                    environment_summary_for_prompt,
-                                )
-
-                                _meta["environment_summary"] = environment_summary_for_prompt(
-                                    _ae,
-                                    max_chars=PERSONA_ALIGNMENT_ENV_SUMMARY_MAX_CHARS,
-                                )
-                        except Exception:
-                            pass
-                        s.llm_backend.record_outcome(
-                            _lc_input,
-                            _lc_answer,
-                            _blended,
-                            alignment_metadata=_meta,
+                            _meta["environment_summary"] = environment_summary_for_prompt(
+                                _ae,
+                                max_chars=PERSONA_ALIGNMENT_ENV_SUMMARY_MAX_CHARS,
+                            )
+                    except Exception:
+                        pass
+                    s.llm_backend.record_outcome(
+                        _lc_input,
+                        _lc_answer,
+                        _blended,
+                        alignment_metadata=_meta,
+                    )
+                except Exception as _align_err:
+                    print(
+                        f"[Persona:{self.agent_id}] alignment record error: {_align_err}",
+                        flush=True,
+                    )
+                    s.llm_backend.record_outcome(_lc_input, _lc_answer, _lc_reward)
+                else:
+                    try:
+                        log_alignment_event(
+                            {
+                                "cycle": cycle_id,
+                                "persona": self.agent_id,
+                                "prompt_len": len(_lc_input),
+                                "response_len": len(_lc_answer),
+                                "reward_blended": _blended,
+                                "diagnostics": _diag,
+                            }
                         )
-                    except Exception as _align_err:
+                    except Exception as _log_err:
                         print(
-                            f"[Persona:{self.agent_id}] alignment record error: {_align_err}",
+                            f"[Persona:{self.agent_id}] alignment log error: {_log_err}",
                             flush=True,
                         )
-                        s.llm_backend.record_outcome(_lc_input, _lc_answer, _lc_reward)
-                    else:
-                        try:
-                            log_alignment_event(
-                                {
-                                    "cycle": cycle_id,
-                                    "persona": self.agent_id,
-                                    "prompt_len": len(_lc_input),
-                                    "response_len": len(_lc_answer),
-                                    "reward_blended": _blended,
-                                    "diagnostics": _diag,
-                                }
-                            )
-                        except Exception as _log_err:
-                            print(
-                                f"[Persona:{self.agent_id}] alignment log error: {_log_err}",
-                                flush=True,
-                            )
 
-            # -- 15c. Self-grown language (composer phrase + generative) -----
-            _co = getattr(s, "composer", None)
-            if (
-                role == "conversant"
-                and is_conv
-                and _is_real_module(_co)
-                and getattr(_co, "available", False)
-            ):
-                composer_ctx = None
+        # -- 15c. Self-grown language (composer phrase + generative) -----
+        _co = getattr(s, "composer", None)
+        if (
+            role == "conversant"
+            and is_conv
+            and _is_real_module(_co)
+            and getattr(_co, "available", False)
+        ):
+            composer_ctx = None
+            _sync_co = s.neural_sync() if _trueself_traced_fast else s.persona_neural_section()
+            with _sync_co:
                 try:
                     composer_ctx = _co._build_context(
                         current_embedding,
@@ -2338,95 +2613,95 @@ class PersonaAgent(BaseAgent):
                         except Exception:
                             pass
 
-            try:
-                episode.bind_structured_actions(
-                    propose_structured_actions(
-                        episode=episode,
-                        action=action,
-                        outcome=outcome,
-                        agent_environment=getattr(episode, "agent_environment", None) or {},
-                    )
+        try:
+            episode.bind_structured_actions(
+                propose_structured_actions(
+                    episode=episode,
+                    action=action,
+                    outcome=outcome,
+                    agent_environment=getattr(episode, "agent_environment", None) or {},
                 )
-            except Exception:
-                episode.bind_structured_actions([])
-
-            # -- Build response payload and store it -------------------------
-            _user_first_encounter = False
-            if _session_uid:
-                _iom = interlocutor_snapshot or {}
-                # Avoid ``interactions`` defaulting to 0 when the model never ran
-                # (unknown speaker, gate off, or no update this turn).
-                if _iom.get("known"):
-                    try:
-                        _ix = int(_iom.get("interactions", 0) or 0)
-                        _user_first_encounter = _ix <= 1
-                    except (TypeError, ValueError):
-                        _user_first_encounter = True
-            response_payload = self._build_response_payload(
-                action,
-                outcome,
-                episode,
-                emotion_summary,
-                knowledge_summary,
-                reasoning_result,
-                interlocutor_snapshot,
-                drive_state,
-                meta_assessment,
-                cycle_id=cycle_id,
-                cycle_depth=_cycle_depth,
-                debug_recall=debug_recall_flag,
-                communication_debug=communication_debug_flag,
-                utterance_style_used=_utter_style,
-                role=role,
-                in_conversation=is_conv,
-                user_text=_ut_reply,
-                user_session_id=_session_uid,
-                first_encounter=_user_first_encounter,
             )
-            try:
-                _cm = getattr(s, "cognitive_metrics", None)
-                if _cm is not None:
-                    _lc = getattr(episode, "llm_context", None) or {}
-                    if isinstance(_lc, dict):
-                        _cm.observe_llm_wait_ms(_lc.get("latency_ms"))
-                    _cm.observe_persona_cycle_ms((time.time() - t0) * 1000.0)
-            except Exception:
-                pass
-            log_chat_pipeline(
-                "persona.before_response_attach",
+        except Exception:
+            episode.bind_structured_actions([])
+
+        # -- Build response payload and store it -------------------------
+        _user_first_encounter = False
+        if _session_uid:
+            _iom = interlocutor_snapshot or {}
+            # Avoid ``interactions`` defaulting to 0 when the model never ran
+            # (unknown speaker, gate off, or no update this turn).
+            if _iom.get("known"):
+                try:
+                    _ix = int(_iom.get("interactions", 0) or 0)
+                    _user_first_encounter = _ix <= 1
+                except (TypeError, ValueError):
+                    _user_first_encounter = True
+        response_payload = self._build_response_payload(
+            action,
+            outcome,
+            episode,
+            emotion_summary,
+            knowledge_summary,
+            reasoning_result,
+            interlocutor_snapshot,
+            drive_state,
+            meta_assessment,
+            cycle_id=cycle_id,
+            cycle_depth=_cycle_depth,
+            debug_recall=debug_recall_flag,
+            communication_debug=communication_debug_flag,
+            utterance_style_used=_utter_style,
+            role=role,
+            in_conversation=is_conv,
+            user_text=_ut_reply,
+            user_session_id=_session_uid,
+            first_encounter=_user_first_encounter,
+        )
+        try:
+            _cm = getattr(s, "cognitive_metrics", None)
+            if _cm is not None:
+                _lc = getattr(episode, "llm_context", None) or {}
+                if isinstance(_lc, dict):
+                    _cm.observe_llm_wait_ms(_lc.get("latency_ms"))
+                _cm.observe_persona_cycle_ms((time.time() - t0) * 1000.0)
+        except Exception:
+            pass
+        log_input_pipeline(
+            "persona.before_response_attach",
+            trace_id=_pipe_tid,
+            detail=f"agent={self.agent_id} strategy={action.get('strategy', '?')}",
+        )
+        trace_attach_to_payload(_trace_slot, response_payload)
+        self._last_response_payload = response_payload
+
+        slot = msg.response_slot
+        if slot:
+            slot["result"] = response_payload
+            slot["event"].set()
+            log_input_pipeline(
+                "persona.http_slot_set",
                 trace_id=_pipe_tid,
-                detail=f"agent={self.agent_id} strategy={action.get('strategy', '?')}",
+                detail=f"agent={self.agent_id}",
             )
-            trace_attach_to_payload(_trace_slot, response_payload)
-            self._last_response_payload = response_payload
 
-            slot = msg.response_slot
-            if slot:
-                slot["result"] = response_payload
-                slot["event"].set()
-                log_chat_pipeline(
-                    "persona.http_slot_set",
-                    trace_id=_pipe_tid,
-                    detail=f"agent={self.agent_id}",
-                )
+        # -- Complete input goal (FIFO / Fuel) -------------------------
+        self._complete_input_goal_from_message(msg)
 
-            # -- Complete input goal (FIFO / Fuel) -------------------------
-            self._complete_input_goal_from_message(msg)
+        # -- Mark processed and check relay ----------------------------
+        msg.mark_processed_by(self.agent_id)
+        self._maybe_relay(msg, action, episode)
 
-            # -- Mark processed and check relay ----------------------------
-            msg.mark_processed_by(self.agent_id)
-            self._maybe_relay(msg, action, episode)
-
-            elapsed = time.time() - t0
-            _prev = (content or "")[:50]
-            print(
-                f"[CognitiveLoop] persona={self.agent_id} "
-                f"local_iter={self._cycle_count} global_cycle={cycle_id} "
-                f"depth={_cycle_depth} elapsed={elapsed:.2f}s "
-                f"strategy={action.get('strategy', '?')} | {_prev}",
-                flush=True,
-            )
-            self._yield_after_cycle_if_input_pipeline_busy()
+        elapsed = time.time() - t0
+        _prev = (content or "")[:50]
+        print(
+            f"[CognitiveLoop] persona={self.agent_id} "
+            f"local_iter={self._cycle_count} global_cycle={cycle_id} "
+            f"depth={_cycle_depth} elapsed={elapsed:.2f}s "
+            f"strategy={action.get('strategy', '?')} | {_prev}",
+            flush=True,
+        )
+        self._yield_after_cycle_if_input_pipeline_busy()
 
     # -- idle cycle (no messages) --------------------------------------
 

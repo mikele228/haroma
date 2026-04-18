@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import time
 import threading
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 # =====================================================================
 # Base class
@@ -279,39 +279,79 @@ class _AudioEventClassifier:
 _vision_encoder: Optional[_VisionEncoder] = None
 _audio_transcriber: Optional[_AudioTranscriber] = None
 _audio_classifier: Optional[_AudioEventClassifier] = None
-_neural_init_lock = threading.Lock()
-_neural_initialized = False
-_neural_init_started = False
+_vision_init_lock = threading.Lock()
+_audio_neural_init_lock = threading.Lock()
+_vision_initialized = False
+_audio_neural_initialized = False
+_warmup_started = False
+
+# Set by mind.elarion_server_v2 after BootAgent.shared exists so heavy audio models
+# (Whisper / AST) do not load during an active HTTP /chat turn.
+_http_chat_busy_fn: Optional[Callable[[], bool]] = None
+
+
+def register_http_chat_busy_checker(fn: Optional[Callable[[], bool]]) -> None:
+    """When set, :func:`_ensure_audio_neural_models` skips loading while the callback is true."""
+    global _http_chat_busy_fn
+    _http_chat_busy_fn = fn
+
+
+def _http_chat_busy() -> bool:
+    if _http_chat_busy_fn is None:
+        return False
+    try:
+        return bool(_http_chat_busy_fn())
+    except Exception:
+        return False
 
 
 def warmup_neural_models():
-    """Start loading neural models in a background thread (non-blocking)."""
-    global _neural_init_started
-    if _neural_init_started or _neural_initialized:
+    """Load the vision encoder in a background thread. Audio models load lazily."""
+    global _warmup_started
+    if _warmup_started or _vision_initialized:
         return
-    _neural_init_started = True
-    t = threading.Thread(target=_ensure_neural_models, daemon=True)
+    _warmup_started = True
+    t = threading.Thread(target=_ensure_vision_models, daemon=True)
     t.start()
 
 
-def _ensure_neural_models():
-    """Lazy-init neural perception models on first use."""
-    global _vision_encoder, _audio_transcriber, _audio_classifier
-    global _neural_initialized, _neural_init_started
-    if _neural_initialized:
+def _ensure_vision_models() -> None:
+    """Lazy-init CLIP / vision encoder only (does not load Whisper)."""
+    global _vision_encoder, _vision_initialized
+    if _vision_initialized:
         return
-    with _neural_init_lock:
-        if _neural_initialized:
+    with _vision_init_lock:
+        if _vision_initialized:
             return
-        _neural_init_started = True
         _vision_encoder = _VisionEncoder()
+        _vision_initialized = True
+
+
+def _ensure_audio_neural_models() -> None:
+    """Lazy-init Whisper + audio event classifier. Deferred while HTTP /chat is in flight."""
+    global _audio_transcriber, _audio_classifier, _audio_neural_initialized
+    if _audio_neural_initialized:
+        return
+    if _http_chat_busy():
+        return
+    with _audio_neural_init_lock:
+        if _audio_neural_initialized:
+            return
+        if _http_chat_busy():
+            return
         _audio_transcriber = _AudioTranscriber()
         _audio_classifier = _AudioEventClassifier()
-        _neural_initialized = True
+        _audio_neural_initialized = True
+
+
+def _ensure_neural_models() -> None:
+    """Full perception stack (vision + audio). Prefer :func:`_ensure_vision_models` / :func:`_ensure_audio_neural_models` when splitting work."""
+    _ensure_vision_models()
+    _ensure_audio_neural_models()
 
 
 def get_neural_perception_stats() -> Dict[str, Any]:
-    _ensure_neural_models()
+    _ensure_vision_models()
     return {
         "vision_encoder": _vision_encoder.available if _vision_encoder else False,
         "audio_transcriber": _audio_transcriber.available if _audio_transcriber else False,
@@ -372,7 +412,7 @@ class VisionAdapter(SensorAdapter):
             "has_motion": False,
             "timestamp": time.time(),
         }
-        _ensure_neural_models()
+        _ensure_vision_models()
         if _vision_encoder and _vision_encoder.available:
             embedding = _vision_encoder.encode_image(frame)
             if embedding is not None:
@@ -452,8 +492,8 @@ class AudioAdapter(SensorAdapter):
                 "is_speech_likely": rms > 0.01 and spectral_centroid > 50,
                 "timestamp": time.time(),
             }
-            _ensure_neural_models()
             if rms > 0.005:
+                _ensure_audio_neural_models()
                 if (
                     _audio_transcriber
                     and _audio_transcriber.available

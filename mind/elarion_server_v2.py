@@ -32,11 +32,11 @@ Env ``HAROMA_CHAT_TIMEOUT`` (optional): seconds for HTTP ``/chat`` to wait on
 the cognitive slot. If unset, the wait is ``max(540, LLM_cap+120)`` (or
 ``600`` when LLM timeout is unlimited).
 
-Env ``HAROMA_CHAT_PIPELINE_LOG=1``: print ``[ChatPipeline]`` lines with a
-per-turn ``trace=`` id (see :mod:`mind.chat_pipeline_log`) so you can see the
-last stage reached before a stall. Use ``HAROMA_CHAT_PIPELINE_TIMING=1`` for
-``seg=…ms cum=…ms`` on each line (delta since previous stage, cumulative since
-first log), or set ``HAROMA_CHAT_PIPELINE_LOG=full`` for logs + timing together.
+Env ``HAROMA_INPUT_PIPELINE_LOG=1`` (legacy: ``HAROMA_CHAT_PIPELINE_LOG``): print
+``[InputPipeline]`` lines with a per-turn ``trace=`` id (see :mod:`mind.chat_pipeline_log`)
+so you can see the last stage reached before a stall. Use ``HAROMA_INPUT_PIPELINE_TIMING=1``
+(legacy: ``HAROMA_CHAT_PIPELINE_TIMING=1``) for ``seg=…ms cum=…ms`` on each line, or set
+``HAROMA_INPUT_PIPELINE_LOG=full`` for logs + timing together.
 
 ``HAROMA_LLM_DUMMY_REPLY=1`` skips real ``generate_chat`` only inside packed-LLM
 inference; the full persona stack (including ``persona_neural_section`` / shared
@@ -50,18 +50,29 @@ path while dummy (pack-size profiling).
 work so input completes first
 (see :mod:`mind.chat_priority`). Set to ``0`` to interleave as before.
 
-After each persona cognitive cycle, if the **input pipeline** is still busy (HTTP
-``/chat`` lifecycle and/or :class:`agents.input_agent.InputAgent` text/sensor
-queues), agents sleep ``HAROMA_POST_CYCLE_INPUT_BUSY_SLEEP_SEC`` (fallback:
-``HAROMA_POST_CYCLE_CHAT_BUSY_SLEEP_SEC``, default ``3``), up to
+``HAROMA_TRUESELF_HTTP_CHAT_UNPHASED`` (default ``1``): when ``HAROMA_PERSONA_PHASED_CYCLE=1``,
+still run **HTTP-traced** TrueSelf conversant turns in **one** synchronous pass (no
+multi-tick phased scheduling), so async ``/chat`` is not stretched across ticks.
+Set to ``0`` to use phased mode for TrueSelf like other agents.
+
+After each persona cognitive cycle, if **HTTP /chat or text queues** are still
+active (see :func:`mind.chat_priority.input_pipeline_yield_busy`; sensor-only
+backlog does not trigger this), agents sleep ``HAROMA_POST_CYCLE_INPUT_BUSY_SLEEP_SEC``
+(fallback: ``HAROMA_POST_CYCLE_CHAT_BUSY_SLEEP_SEC``, default ``0.05``), up to
 ``HAROMA_POST_CYCLE_INPUT_BUSY_MAX_RETRIES`` (fallback:
 ``HAROMA_POST_CYCLE_CHAT_BUSY_MAX_RETRIES``, default ``1``; ``0`` = retry until
-idle). See :meth:`agents.persona_agent.PersonaAgent._yield_after_cycle_if_input_pipeline_busy`
-and :func:`mind.chat_priority.input_pipeline_busy`.
+idle). See :meth:`agents.persona_agent.PersonaAgent._yield_after_cycle_if_input_pipeline_busy`.
+Full :func:`mind.chat_priority.input_pipeline_busy` still includes sensor queues
+for deferral and status snapshots.
 
 Input latency: ``HAROMA_INPUT_TICK_INTERVAL_SEC`` overrides InputAgent tick
 (default in ``soul/agents.json`` / merged config is ~0.12s). User HTTP messages
-are queued with **priority** over other text. Optional JSON ``depth`` is accepted for
+are queued with **priority** over other text. For sub-2s turns on CPU, typical
+``.env`` tuning includes ``HAROMA_INPUT_CHAT_SKIP_ENCODER=1`` (skip SBERT in
+InputAgent), ``HAROMA_TRUESELF_USER_CHAT_FAST_RECALL=1`` (FAISS-only recall),
+``HAROMA_TRUESELF_USER_CHAT_BUDGET_SEC`` / ``HAROMA_TRUESELF_USER_CHAT_SKIP_PERSONA_ENCODE``,
+and ``HAROMA_POST_CYCLE_INPUT_BUSY_SLEEP_SEC=0`` — see :mod:`agents.persona_agent` and
+:mod:`agents.input_agent`. Optional JSON ``depth`` is accepted for
 compatibility and normalized to ``normal``. Set
 ``HAROMA_BG_DEFER_TRAINING_ON_INPUT_PIPELINE=0`` (or legacy
 ``HAROMA_BG_DEFER_TRAINING_ON_HTTP_CHAT=0``) to keep background training while the
@@ -194,7 +205,7 @@ from mind.cognitive_contracts import (
 )
 from mind.symbolic_law_api import handle_laws_request
 from mind.chat_async_registry import ChatAsyncRegistry, truthy_async_flag
-from mind.chat_pipeline_log import log_chat_pipeline, pipeline_trace_end, trace_id_from_slot
+from mind.chat_pipeline_log import log_input_pipeline, pipeline_trace_end, trace_id_from_slot
 from mind.config_env import env_float
 from mind.http_chat_timeouts import http_chat_wait_sec as _http_chat_wait_sec
 from mind.http_server_guards import (
@@ -231,6 +242,7 @@ from sensors.adapters import (
     InfraredAdapter,
     ImuAdapter,
     GpsAdapter,
+    register_http_chat_busy_checker,
     warmup_neural_models,
 )
 
@@ -387,7 +399,7 @@ def _async_chat_resolve_ready(rid: str) -> Tuple[str, Any]:
     except Exception as _rc:
         print(f"[Server-v2] chat async remember_completed error: {_rc}", flush=True)
     _atid = trace_id_from_slot(ent.get("slot"))
-    log_chat_pipeline(
+    log_input_pipeline(
         "http.async_slot_ready",
         trace_id=_atid,
         detail=f"rid={rid}",
@@ -454,6 +466,9 @@ def _init():
         )
 
         st.boot_agent = ba
+        register_http_chat_busy_checker(
+            lambda: int(getattr(shared, "http_chat_inflight", 0) or 0) > 0
+        )
 
         # 4. Start all agents
         ba.start_all()
@@ -731,7 +746,7 @@ def chat():
         )
         _ptid = trace_id_from_slot(slot)
         _pipeline_tid = _ptid
-        log_chat_pipeline("http.after_push_text", trace_id=_ptid)
+        log_input_pipeline("http.after_push_text", trace_id=_ptid)
         _after_push = time.time() - _chat_t0
         _push_note = "message queued; persona cycle runs async"
         print(
@@ -750,7 +765,7 @@ def chat():
             )
             _async_handoff = True
             print(f"[Server-v2] chat async handoff request_id={rid}", flush=True)
-            log_chat_pipeline(
+            log_input_pipeline(
                 "http.async_202",
                 trace_id=_ptid,
                 detail=f"request_id={rid}",
@@ -766,13 +781,13 @@ def chat():
             )
 
         _chat_wait = _http_chat_wait_sec(depth)
-        log_chat_pipeline(
+        log_input_pipeline(
             "http.sync_wait_start",
             trace_id=_ptid,
             detail=f"timeout_sec={_chat_wait}",
         )
         if slot["event"].wait(timeout=_chat_wait):
-            log_chat_pipeline("http.sync_wait_done", trace_id=_ptid)
+            log_input_pipeline("http.sync_wait_done", trace_id=_ptid)
             result = normalize_http_chat_response(slot["result"])
             input_agent.log_response(result)
             print(
@@ -786,7 +801,7 @@ def chat():
             f"after push_text={_after_push:.2f}s",
             flush=True,
         )
-        log_chat_pipeline(
+        log_input_pipeline(
             "http.sync_wait_timeout",
             trace_id=_ptid,
             detail=f"timeout_sec={_chat_wait}",

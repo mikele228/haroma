@@ -15,7 +15,10 @@ Tick loop:
   4. Forward to TrueSelf via send_direct
 
 User chat uses the **chat** input sensor (see ``sensor_data.chat`` on the
-forwarded message). Each dispatch adds ``senses_numpy``: canonical per-modality
+forwarded message), same list-of-readings shape as other channels. Each reading
+dict is annotated with ``text_translation`` (see :mod:`mind.sensor_text_translation`).
+``sensor_text_translation_digest`` concatenates non-chat modalities for quick
+prompt context. Each dispatch adds ``senses_numpy``: canonical per-modality
 ``float32`` vectors (empty when unavailable) plus ``text_embedding`` — see
 :mod:`mind.sense_numpy_bundle`. **User** messages use a priority queue so they
 are not stuck behind bulk/internal traffic. Env ``HAROMA_INPUT_TICK_INTERVAL_SEC``
@@ -34,7 +37,7 @@ from typing import Any, Dict, List, Optional, TYPE_CHECKING
 import numpy as np
 
 from agents.base import BaseAgent
-from utils.coerce_bool import json_bool
+from utils.coerce_bool import env_flag, json_bool
 from agents.chat_latency import (
     dummy_reply_auto_latency_trace,
     trace_attach_to_payload,
@@ -47,8 +50,12 @@ from agents.message_bus import Message, MessageBus
 from core.cognitive_null import is_cognitive_null
 from mind.user_identity import sanitize_user_id
 from mind.cognitive_observability import new_trace_id
-from mind.chat_pipeline_log import log_chat_pipeline, trace_id_from_slot
+from mind.chat_pipeline_log import log_input_pipeline, trace_id_from_slot
 from mind.sense_numpy_bundle import build_senses_numpy_bundle
+from mind.sensor_text_translation import (
+    enrich_sensor_data,
+    sensor_text_translation_digest,
+)
 
 if TYPE_CHECKING:
     from agents.shared_resources import SharedResources
@@ -220,7 +227,7 @@ class InputAgent(BaseAgent):
             wake_callback()
         else:
             self.wake()
-        log_chat_pipeline(
+        log_input_pipeline(
             "input.push_text_queued",
             trace_id=_tid,
             detail=f"queue={'priority' if _pq else 'normal'}",
@@ -279,12 +286,15 @@ class InputAgent(BaseAgent):
         if sensor_channels:
             # Avoid goal descriptions that are only ``sensors:vision`` — those pollute
             # inner-dialogue / rumination topic picks (see PersonaAgent._pick_rumination_topic).
+            # Pure user /chat adds only the ``chat`` sensor mirror — do not append
+            # ``sensors:chat`` (redundant with the line above; confuses prompts when dummy is off).
+            _ch = [str(c).strip() for c in sensor_channels if str(c).strip()]
+            _only_chat = len(_ch) == 1 and _ch[0].lower() == "chat"
             if text:
-                desc_parts.append(f"sensors:{','.join(sensor_channels)}")
+                if not _only_chat:
+                    desc_parts.append(f"sensors:{','.join(_ch)}")
             else:
-                desc_parts.append(
-                    f"Multimodal tick ({','.join(sensor_channels)})",
-                )
+                desc_parts.append(f"Multimodal tick ({','.join(_ch)})")
         description = " | ".join(desc_parts) or "input_cycle"
         try:
             self.shared.goal.register_input_goal(
@@ -307,7 +317,7 @@ class InputAgent(BaseAgent):
         """NLU + encoder + forward one text item to TrueSelf."""
         slot = item.pop("_slot", None)
         _ptid = trace_id_from_slot(slot if isinstance(slot, dict) else None)
-        log_chat_pipeline("input.dispatch_start", trace_id=_ptid)
+        log_input_pipeline("input.dispatch_start", trace_id=_ptid)
         trace_span(slot, "input_queue_wait")
         content = item.get("content", "")
         source = item.get("source", "user")
@@ -318,15 +328,21 @@ class InputAgent(BaseAgent):
 
         nlu_base = self._lightweight_nlu(content)
         trace_span(slot, "input_nlu")
-        log_chat_pipeline("input.after_nlu", trace_id=_ptid)
+        log_input_pipeline("input.after_nlu", trace_id=_ptid)
 
         embedding = None
         _encoder_real = self.shared.encoder is not None and not is_cognitive_null(
             self.shared.encoder
         )
-        if _encoder_real and content:
+        # Optional: skip SBERT encode for user /chat to cut ~1–3s CPU on large encoders (TrueSelf
+        # can still answer from text; persona may skip re-encode via HAROMA_TRUESELF_USER_CHAT_*).
+        _skip_enc = env_flag("HAROMA_INPUT_CHAT_SKIP_ENCODER", False) and str(source).lower() in (
+            "user",
+            "human",
+        )
+        if _encoder_real and content and not _skip_enc:
             try:
-                log_chat_pipeline("input.before_encoder_neural_sync", trace_id=_ptid)
+                log_input_pipeline("input.before_encoder_neural_sync", trace_id=_ptid)
                 with self.shared.neural_sync():
                     raw_emb = self.shared.encoder.encode(content)
                 if raw_emb is not None:
@@ -344,7 +360,7 @@ class InputAgent(BaseAgent):
                 print(f"[InputAgent] encoder error: {exc}", flush=True)
 
         trace_span(slot, "input_encoder")
-        log_chat_pipeline("input.after_encoder", trace_id=_ptid)
+        log_input_pipeline("input.after_encoder", trace_id=_ptid)
 
         # Merge multimodal sensors with the **chat** input sensor (same shape as ``push_sensor``).
         _sensor_payload: Dict[str, Any] = {}
@@ -374,6 +390,9 @@ class InputAgent(BaseAgent):
                 }
             )
 
+        enrich_sensor_data(_sensor_payload)
+        _sensor_digest = sensor_text_translation_digest(_sensor_payload)
+
         # FIFO goal registration (chat counts as a sensor channel when text is present).
         _goal_id: Optional[str] = None
         if self._fifo_enabled:
@@ -398,6 +417,7 @@ class InputAgent(BaseAgent):
             "nlu_base": nlu_base,
             "embedding": embedding,
             "sensor_data": _sensor_payload,
+            "sensor_text_translation_digest": _sensor_digest,
             "senses_numpy": _senses_numpy,
             "cycle_depth": depth,
             "debug_recall": json_bool(item.get("debug_recall"), False),
@@ -427,10 +447,10 @@ class InputAgent(BaseAgent):
         )
 
         trace_span(slot, "input_to_trueself_handoff")
-        log_chat_pipeline("input.before_send_to_trueself", trace_id=_ptid)
+        log_input_pipeline("input.before_send_to_trueself", trace_id=_ptid)
 
         self.bus.send_direct(self._TRUESELF_ID, msg)
-        log_chat_pipeline("input.after_send_to_trueself", trace_id=_ptid)
+        log_input_pipeline("input.after_send_to_trueself", trace_id=_ptid)
 
         if slot is not None and self._boot_agent is not None:
             try:
@@ -513,6 +533,8 @@ class InputAgent(BaseAgent):
 
         # Standalone sensor message (no text items, or unify not enabled)
         if sensor_items and not (text_items and self._unify_sensor):
+            enrich_sensor_data(merged_sensor)
+            _standalone_digest = sensor_text_translation_digest(merged_sensor)
             _sensor_goal_id: Optional[str] = None
             if self._fifo_enabled:
                 _sensor_goal_id = self._next_input_goal_id()
@@ -531,6 +553,7 @@ class InputAgent(BaseAgent):
                     "nlu_base": {},
                     "embedding": None,
                     "sensor_data": merged_sensor,
+                    "sensor_text_translation_digest": _standalone_digest,
                     "input_goal_id": _sensor_goal_id,
                 },
                 message_type="input",

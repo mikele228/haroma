@@ -8,6 +8,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from mind.cognitive_contracts import (
+    CHAT_RESPONSE_LLM_TIMEOUT,
     CHAT_RESPONSE_UNKNOWN,
     normalize_http_chat_response,
     resolve_chat_visible_text,
@@ -37,6 +38,27 @@ def test_resolve_prefers_answer_when_chat_only():
         llm_context={"source": "chat_only", "answer": "Plain model reply."},
     )
     assert out == "Plain model reply."
+
+
+def test_resolve_prefers_answer_when_nonjson_prose():
+    """Models often skip JSON; ``llm_nonjson_reply`` must beat noisy ``action[\"text\"]``."""
+    out = resolve_chat_visible_text(
+        {"text": "how are you?"},
+        llm_context={
+            "source": "llm_nonjson_reply",
+            "answer": "I'm doing well — thanks for asking.",
+        },
+    )
+    assert out == "I'm doing well — thanks for asking."
+
+
+def test_resolve_llm_timeout_beats_noisy_action_text():
+    """Deliberative text must not mask a packed-LLM timeout."""
+    out = resolve_chat_visible_text(
+        {"text": "how are you?"},
+        llm_context={"source": "llm_timeout"},
+    )
+    assert out == CHAT_RESPONSE_LLM_TIMEOUT
 
 
 def test_resolve_truncates_end_marker():

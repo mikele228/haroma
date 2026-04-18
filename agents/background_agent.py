@@ -1045,11 +1045,13 @@ class BackgroundAgent(BaseAgent):
 
         _train_map = build_background_train_map(s)
         nmap = len(_train_map)
-        raw_cap = str(os.environ.get("HAROMA_BG_MAX_TRAIN_MODULES_PER_TICK", "") or "").strip()
+        # Default 1: spread training across ticks so each neural_train_write stays short.
+        # Set HAROMA_BG_MAX_TRAIN_MODULES_PER_TICK=0 to train every module every tick (legacy).
+        raw_cap = str(os.environ.get("HAROMA_BG_MAX_TRAIN_MODULES_PER_TICK", "1") or "").strip()
         try:
             cap = int(raw_cap) if raw_cap else 0
         except (TypeError, ValueError):
-            cap = 0
+            cap = 1
 
         if cap <= 0 or nmap == 0 or cap >= nmap:
             train_pairs = list(_train_map)

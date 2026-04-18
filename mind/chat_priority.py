@@ -22,7 +22,41 @@ from typing import Any
 
 from utils.coerce_bool import env_flag
 
-__all__ = ["chat_input_priority_defer_non_user", "input_pipeline_busy"]
+__all__ = [
+    "chat_input_priority_defer_non_user",
+    "input_pipeline_busy",
+    "input_pipeline_yield_busy",
+]
+
+
+def input_pipeline_yield_busy(shared: Any, boot_agent: Any = None) -> bool:
+    """True when a persona should briefly yield after a cycle (HTTP chat or text queues).
+
+    Unlike :func:`input_pipeline_busy`, this **does not** treat ``sensor_pending`` as
+    busy. A steady sensor stream would otherwise make every persona pay the
+    post-cycle sleep (``HAROMA_POST_CYCLE_*_SLEEP_SEC``) even though no HTTP/text
+    work is waiting — a major source of multi-second chat latency.
+    """
+    try:
+        if int(getattr(shared, "http_chat_inflight", 0) or 0) > 0:
+            return True
+    except Exception:
+        pass
+    ia = getattr(shared, "_input_agent_ref", None)
+    if ia is None and boot_agent is not None:
+        ia = getattr(boot_agent, "input_agent", None)
+    if ia is None:
+        return False
+    if not hasattr(ia, "buffer_stats"):
+        return False
+    try:
+        st = ia.buffer_stats()
+        return (
+            int(st.get("text_pending", 0) or 0) > 0
+            or int(st.get("text_priority_pending", 0) or 0) > 0
+        )
+    except Exception:
+        return True
 
 
 def input_pipeline_busy(shared: Any, boot_agent: Any = None) -> bool:

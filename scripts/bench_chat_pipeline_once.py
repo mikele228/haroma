@@ -3,7 +3,7 @@
 Run the server in another terminal with dummy + full pipeline logging, then:
 
   set HAROMA_LLM_DUMMY_REPLY=1
-  set HAROMA_CHAT_PIPELINE_LOG=full
+  set HAROMA_INPUT_PIPELINE_LOG=full
   set HAROMA_LIVE_ROBOT_HEAD=0
   set HAROMA_BENCH_DISABLE_BG_TRAINING=1
   python -m mind.elarion_server_v2
@@ -13,7 +13,7 @@ Wait for boot (~40s), then:
   python scripts/bench_chat_pipeline_once.py
 
 Uses POST /chat with ``\"async\": false`` so the HTTP call blocks until the slot
-fills. Check server stderr for ``[ChatPipeline]`` lines with ``seg=`` / ``cum=`` to
+fills. Check server stderr for ``[InputPipeline]`` lines with ``seg=`` / ``cum=`` to
 see where time went (largest ``seg`` first).
 """
 

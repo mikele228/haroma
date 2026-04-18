@@ -48,6 +48,28 @@ def test_input_pipeline_busy_via_boot_agent(monkeypatch: pytest.MonkeyPatch):
     assert input_pipeline_busy(s, boot) is True
 
 
+def test_input_pipeline_yield_busy_ignores_sensor_only():
+    from mind.chat_priority import input_pipeline_yield_busy
+
+    class _IA:
+        def buffer_stats(self):
+            return {"text_pending": 0, "text_priority_pending": 0, "sensor_pending": 99}
+
+    s = SimpleNamespace(http_chat_inflight=0, _input_agent_ref=_IA())
+    assert input_pipeline_yield_busy(s, None) is False
+
+
+def test_input_pipeline_yield_busy_http_inflight():
+    from mind.chat_priority import input_pipeline_yield_busy
+
+    class _IA:
+        def buffer_stats(self):
+            return {"text_pending": 0, "text_priority_pending": 0, "sensor_pending": 99}
+
+    s = SimpleNamespace(http_chat_inflight=1, _input_agent_ref=_IA())
+    assert input_pipeline_yield_busy(s, None) is True
+
+
 def test_input_pipeline_busy_idle():
     from mind.chat_priority import input_pipeline_busy
 

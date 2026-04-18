@@ -45,9 +45,8 @@ def prioritize_trueself_input_messages(msgs: List[Message]) -> List[Message]:
     on ``_response_slot``). Also boosts ``source=user`` text so user chat is not starved
     when metadata is incomplete.
     """
-    if len(msgs) <= 1:
+    if not msgs:
         return msgs
-
     return [m for _, m in sorted(enumerate(msgs), key=lambda im: (input_tier(im[1]), im[0]))]
 
 
