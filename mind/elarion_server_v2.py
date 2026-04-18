@@ -45,6 +45,11 @@ without decode. ``HAROMA_LLM_DUMMY_FULL_PACK``
 controls whether :mod:`engine.LLMContextReasoner` runs the expensive ``build_messages``
 path while dummy (pack-size profiling).
 
+``HAROMA_LLM_LOG_PAYLOAD=1`` logs packed prompt messages and raw model output as JSON
+lines from :mod:`engine.LLMContextReasoner` (optional ``HAROMA_LLM_LOG_PAYLOAD_PER_MESSAGE_CHARS``,
+``HAROMA_LLM_LOG_PAYLOAD_OUT_CHARS``). Do not enable on shared logs if prompts may contain
+private recall text.
+
 ``HAROMA_CHAT_INPUT_PRIORITY`` (default ``1``): while the input pipeline is busy
 (HTTP ``/chat`` and/or InputAgent queues), defer non-critical persona/TrueSelf/background
 work so input completes first
@@ -193,11 +198,8 @@ from sensors.domains import resolve_channel_to_domain
 
 from agents.boot_agent import BootAgent
 from agents.input_agent import normalize_chat_inline_sensor_data
-from agents.chat_latency import (
-    packed_llm_dummy_probe_active,
-    packed_llm_dummy_reply_raw,
-    trace_requested,
-)
+from agents.chat_latency import trace_requested
+from mind.packed_llm_dummy_env import packed_llm_dummy_probe_active, packed_llm_dummy_reply_raw
 from utils.coerce_bool import json_bool as _json_bool
 from mind.cognitive_contracts import (
     llm_context_timeout_seconds,

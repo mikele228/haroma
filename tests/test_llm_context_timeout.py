@@ -27,12 +27,6 @@ from mind.cycle_flow import run_llm_context_reasoning_phase
 pytestmark = pytest.mark.torch
 
 
-@pytest.fixture(autouse=True)
-def _isolate_llm_dummy_env(monkeypatch):
-    """Project ``.env`` may set ``HAROMA_LLM_DUMMY_REPLY``; clear it unless a test sets it."""
-    monkeypatch.delenv("HAROMA_LLM_DUMMY_REPLY", raising=False)
-
-
 class _SlowBackend:
     available = True
 

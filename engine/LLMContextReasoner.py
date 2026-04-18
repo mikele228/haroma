@@ -20,6 +20,11 @@ Env (debug / probe)
 * ``HAROMA_LLM_LOG_PACKED_STATS`` (``1``/``true``): after ``build_messages``,
   log one line with UTF-8 byte size, character count, rough token estimate
   (chars/4), and per-role character counts.
+* ``HAROMA_LLM_LOG_PAYLOAD`` (``1``/``true``): before/after each real ``generate_chat``,
+  print JSON lines ``PAYLOAD_IN`` / ``PAYLOAD_OUT`` (messages list and raw model text).
+  Truncation: ``HAROMA_LLM_LOG_PAYLOAD_PER_MESSAGE_CHARS`` (default ``16000``, hard max ``128000``) per message
+  body, ``HAROMA_LLM_LOG_PAYLOAD_OUT_CHARS`` (default ``32000``, hard max ``256000``) for the assistant raw string.
+  **Secrets:** prompts may contain recalled text or API-adjacent content — use only on trusted logs.
 * ``HAROMA_LLM_DUMMY_REPLY`` (``1``/``true``): skip ``generate_chat`` and
   return immediately (default user-visible text ``Testing reply``). Chat JSON
   includes ``latency_trace`` automatically (see :mod:`agents.chat_latency`);
@@ -75,6 +80,8 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from typing import Any, Dict, List, Optional
 
 from mind.packed_llm_context import host_environment_sections_for_prompt
+from mind.haroma_settings import synthetic_llm_dummy_reply_env
+from mind.response_text import clean_packed_json_answer_text, sanitize_llm_plain_answer
 
 
 def _env_truthy(name: str) -> bool:
@@ -126,6 +133,78 @@ def _log_packed_stats(
         f"{_extra}",
         flush=True,
     )
+
+
+def _payload_log_per_message_chars() -> int:
+    raw = str(os.environ.get("HAROMA_LLM_LOG_PAYLOAD_PER_MESSAGE_CHARS", "16000") or "").strip()
+    try:
+        return max(256, min(int(raw), 128_000))
+    except (TypeError, ValueError):
+        return 16000
+
+
+def _payload_log_out_chars() -> int:
+    raw = str(os.environ.get("HAROMA_LLM_LOG_PAYLOAD_OUT_CHARS", "32000") or "").strip()
+    try:
+        return max(512, min(int(raw), 256_000))
+    except (TypeError, ValueError):
+        return 32000
+
+
+def _json_line_for_payload_log(obj: Dict[str, Any]) -> str:
+    """Serialize log payload; fall back to ASCII escapes if values are not JSON-safe."""
+    try:
+        return json.dumps(obj, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return json.dumps(obj, ensure_ascii=True, default=str)
+
+
+def _truncate_payload_log_text(s: str, limit: int) -> str:
+    t = str(s)
+    if len(t) <= limit:
+        return t
+    return t[: max(0, limit - 24)] + "\n… [truncated] …\n"
+
+
+def _log_llm_payload_in(messages: List[Dict[str, Any]]) -> None:
+    """Log packed chat messages sent to ``generate_chat`` (opt-in via ``HAROMA_LLM_LOG_PAYLOAD``)."""
+    if not _env_truthy("HAROMA_LLM_LOG_PAYLOAD"):
+        return
+    cap = _payload_log_per_message_chars()
+    try:
+        slim: List[Dict[str, Any]] = []
+        for m in messages:
+            role = str(m.get("role", "?"))
+            content = _truncate_payload_log_text(str(m.get("content", "") or ""), cap)
+            slim.append({"role": role, "content": content})
+        line = _json_line_for_payload_log({"kind": "PAYLOAD_IN", "messages": slim})
+        print(f"[LLMContextReasoner] {line}", flush=True)
+    except Exception as exc:
+        print(f"[LLMContextReasoner] PAYLOAD_IN log error: {exc}", flush=True)
+
+
+def _log_llm_payload_out(
+    raw: Optional[str],
+    *,
+    error: Optional[str] = None,
+) -> None:
+    """Log raw model text (or timeout/error) after ``generate_chat``."""
+    if not _env_truthy("HAROMA_LLM_LOG_PAYLOAD"):
+        return
+    cap = _payload_log_out_chars()
+    try:
+        payload: Dict[str, Any] = {"kind": "PAYLOAD_OUT"}
+        if error:
+            payload["error"] = error[:2000]
+        if raw is None:
+            payload["raw"] = None
+        else:
+            payload["raw"] = _truncate_payload_log_text(str(raw), cap)
+            payload["raw_chars"] = len(str(raw))
+        line = _json_line_for_payload_log(payload)
+        print(f"[LLMContextReasoner] {line}", flush=True)
+    except Exception as exc:
+        print(f"[LLMContextReasoner] PAYLOAD_OUT log error: {exc}", flush=True)
 
 
 def _prompt_info_payload(
@@ -809,8 +888,11 @@ def parse_response(raw: Optional[str]) -> "LLMContextResult":
                     plain = plain.rstrip()[:-3].rstrip()
         plain = plain.strip()
         if plain:
+            _plain = sanitize_llm_plain_answer(plain)
+            if not _plain:
+                return LLMContextResult.empty("json_parse_failed")
             return LLMContextResult(
-                answer=plain[:8000],
+                answer=_plain,
                 confidence=0.45,
                 reasoning_steps=[],
                 requires_confirmation=True,
@@ -824,6 +906,10 @@ def parse_response(raw: Optional[str]) -> "LLMContextResult":
         answer = obj.get("answer")
     if answer is not None:
         answer = str(answer).strip() or None
+        if answer:
+            answer = clean_packed_json_answer_text(answer)
+            if not answer:
+                answer = None
 
     confidence = 0.0
     try:
@@ -1073,7 +1159,7 @@ def run_llm_context_reasoning(
     reply as ``HAROMA_LLM_DUMMY_REPLY`` (``source=dummy_probe``) so callers always
     get a user-visible string unless ``generate_chat`` runs successfully.
     """
-    _dummy = _env_truthy("HAROMA_LLM_DUMMY_REPLY")
+    _dummy = synthetic_llm_dummy_reply_env()
     _bk_ok = llm_backend is not None and getattr(llm_backend, "available", False)
     _use_synthetic = _dummy or not _bk_ok
     _effective_backend = llm_backend if _bk_ok else _DummyLLMBackendPlaceholder()
@@ -1210,11 +1296,14 @@ def run_llm_context_reasoning(
             f"[LLMContextReasoner] generate_chat (timeout={_exec_tlim:.0f}s)…",
             flush=True,
         )
+        _log_llm_payload_in(messages)
         pool = ThreadPoolExecutor(max_workers=1)
         try:
             fut = pool.submit(_do_generate)
             raw = fut.result(timeout=_exec_tlim)
+            _log_llm_payload_out(raw)
         except FutureTimeout:
+            _log_llm_payload_out(None, error="llm_timeout")
             elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
             print(
                 f"[LLMContextReasoner] generate_chat timed out after "
@@ -1231,6 +1320,7 @@ def run_llm_context_reasoning(
         finally:
             pool.shutdown(wait=False, cancel_futures=True)
     except Exception as exc:
+        _log_llm_payload_out(None, error=str(exc))
         elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
         print(
             f"[LLMContextReasoner] generate_chat error ({elapsed_ms:.0f}ms): {exc}",

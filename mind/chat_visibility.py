@@ -21,6 +21,18 @@ from mind.response_text import (
     truncate_chat_at_end_marker,
 )
 
+# ``llm_context["source"]`` values where the user-visible line is ``llm_context["answer"]``
+# (packed JSON, chat-only, dummy probe, or non-JSON prose). Keep in sync with
+# :meth:`agents.persona_agent.PersonaAgent` primary-path ``action["text"]`` merge.
+LLM_CONTEXT_SOURCES_PREFER_PACKED_ANSWER: frozenset[str] = frozenset(
+    (
+        "llm_context_reasoning",
+        "chat_only",
+        "dummy_probe",
+        "llm_nonjson_reply",
+    )
+)
+
 
 def _self_identity_fallback(
     user_text: str,
@@ -88,12 +100,7 @@ def resolve_chat_visible_text(
     src = str(lc.get("source") or "").strip().lower()
     # Prefer model answer for structured JSON, chat-only, dummy probe, and non-JSON prose
     # (``llm_nonjson_reply``) — otherwise deliberative ``action["text"]`` can echo the user line.
-    if src in (
-        "llm_context_reasoning",
-        "chat_only",
-        "dummy_probe",
-        "llm_nonjson_reply",
-    ):
+    if src in LLM_CONTEXT_SOURCES_PREFER_PACKED_ANSWER:
         _parsed = str(lc.get("answer") or "").strip()
         if _parsed:
             vis = _visible_line(_parsed)

@@ -4,8 +4,10 @@
 → PHASE_ACT_LEARN) is the single reference for step *names* and *sequence*.
 Heavy logic lives in ``ElarionController.run_cycle``; the same named phases are
 reused by ``PersonaAgent`` via the helpers below (law/sidecar, curiosity,
-reasoning, counterfactual, metacognition, imagination, action payload + generate);
-goal synthesis and symbolic queue writes are controller-only helpers in this module.
+reasoning, counterfactual, metacognition, imagination, action payload + generate).
+Optional packed LLM (13.2b) for the controller is in ``mind.packed_llm_controller_bridge``
+(``HAROMA_CONTROLLER_PACKED_LLM``). Goal synthesis and symbolic queue writes are
+controller-only helpers in this module.
 
 **Two ways to run Elarion** (both valid; pick one per deployment):
 
@@ -37,14 +39,17 @@ from __future__ import annotations
 
 import copy
 import json as _json_mod
+import logging
 import math
 import os
 from typing import Any, Dict, List, Optional, Tuple
 
 from core.cognitive_null import is_cognitive_null
+from mind.haroma_settings import elarion_cycle_flow_debug, haroma_state_prompt_max_chars
 from mind.symbolic_sidecar import apply_derived_symbolic_sidecar
 
-_CF_DEBUG = os.environ.get("ELARION_CYCLE_FLOW_DEBUG", "0") == "1"
+_logger = logging.getLogger(__name__)
+_CF_DEBUG = elarion_cycle_flow_debug()
 
 # PersonaAgent neural read lock slices (see agents/persona_agent): embed/perception,
 # then gate/backbone/self-model/discourse — then recall+ pipeline without neural lock.
@@ -58,10 +63,7 @@ PERSONA_NEURAL_PHASES = (
     "neural_post_llm",
 )
 
-_MAX_STATE_JSON_CHARS = max(
-    512,
-    min(100_000, int(os.environ.get("HAROMA_STATE_PROMPT_MAX_CHARS", "3000"))),
-)
+_MAX_STATE_JSON_CHARS = haroma_state_prompt_max_chars()
 
 
 def _cf_warn(label: str, exc: Exception) -> None:
@@ -556,6 +558,10 @@ def organic_confidence(
     return _clamp(max(_clamp(max_inf), _clamp(ap_relevance)))
 
 
+# PersonaAgent / HTTP chat packed LLM step (pipeline step 13.2b).
+TRACE_LABEL_PERSONA_PACKED_LLM: str = "13.2b.llm_context_reasoning"
+
+
 def run_llm_context_reasoning_phase(
     *,
     enabled: bool,
@@ -574,7 +580,7 @@ def run_llm_context_reasoning_phase(
     llm_centric: bool = False,
     episode: Any = None,
     memory_forest: Any = None,
-    trace_label: Optional[str] = "13.3.llm_context_reasoning",
+    trace_label: Optional[str] = TRACE_LABEL_PERSONA_PACKED_LLM,
     timeout_override: Optional[float] = None,
     deliberative: bool = False,
     agent_state_json: str = "",
@@ -589,12 +595,17 @@ def run_llm_context_reasoning_phase(
 
     Set ``bind_episode=False`` when the caller will merge extra fields (e.g.
     deliberative scores) and call ``episode.bind_llm_context`` once — avoids
-    double-binding the same cycle payload.
+    double-binding the same cycle payload. Skipped paths (``enabled=False`` or
+    import failure) honor ``bind_episode`` the same way.
     """
     empty: Dict[str, Any] = {"source": "skipped"}
 
     def _return_skipped(payload: Dict[str, Any]) -> Dict[str, Any]:
-        if episode is not None and hasattr(episode, "bind_llm_context"):
+        if (
+            bind_episode
+            and episode is not None
+            and hasattr(episode, "bind_llm_context")
+        ):
             episode.bind_llm_context(payload)
         return payload
 
@@ -604,9 +615,10 @@ def run_llm_context_reasoning_phase(
     try:
         from mind.cognitive_contracts import run_llm_context_reasoning
     except Exception as _imp_err:
-        print(
-            f"[cycle_flow] cognitive_contracts / packed LLM import failed: {_imp_err}",
-            flush=True,
+        _logger.warning(
+            "cognitive_contracts / packed LLM import failed: %s",
+            _imp_err,
+            exc_info=_CF_DEBUG,
         )
         return _return_skipped(dict(empty))
 

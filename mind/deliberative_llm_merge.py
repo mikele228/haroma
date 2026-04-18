@@ -2,13 +2,16 @@
 
 Callers gather cognitive fields; this module runs ``select_deliberative_candidate``
 and writes ``deliberative_scores`` / ``chosen_action`` on the result dict.
-The merge function is also re-exported from :mod:`mind.cognitive_contracts`.
+:func:`complete_deferred_deliberative_llm_context` bundles value extraction,
+merge, and ``episode.bind_llm_context`` for PersonaAgent's deferred-bind path.
+Exports are re-exported from :mod:`mind.cognitive_contracts`.
 """
 
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
 
+from core.cognitive_null import is_cognitive_null
 from mind.deliberative_choice import (
     canonical_emotion_for_deliberation,
     select_deliberative_candidate,
@@ -81,3 +84,43 @@ def merge_deliberative_into_llm_context(
     except Exception as exc:
         prefix = f"[DeliberativeLLM]{log_context} " if log_context else "[DeliberativeLLM] "
         print(f"{prefix}deliberative select error: {exc}", flush=True)
+
+
+def complete_deferred_deliberative_llm_context(
+    llm_context_result: Dict[str, Any],
+    *,
+    deliberative_flag: bool,
+    val_mgr: Any,
+    episode: Any,
+    active_goals: List[Any],
+    drive_state: Optional[Dict[str, Any]],
+    emotion_summary: Optional[Dict[str, Any]],
+    log_context: str = "",
+) -> None:
+    """After packed LLM with ``bind_episode=False``, merge deliberative scores and bind.
+
+    Reads value weights from *val_mgr* when present, runs
+    :func:`merge_deliberative_into_llm_context`, then ``episode.bind_llm_context``
+    when supported.
+    """
+    current_values: Dict[str, Any] = {}
+    if val_mgr is not None and not is_cognitive_null(val_mgr):
+        try:
+            current_values = dict(getattr(val_mgr.engine, "values", {}) or {})
+        except Exception:
+            current_values = {}
+    sym_law = getattr(episode, "symbolic_law", None)
+    symbolic_law = sym_law if isinstance(sym_law, dict) else None
+    merge_deliberative_into_llm_context(
+        llm_context_result,
+        deliberative_flag=bool(deliberative_flag),
+        current_values=current_values,
+        active_goals=active_goals,
+        drive_state=drive_state,
+        episode_affect=getattr(episode, "affect", None),
+        emotion_summary=emotion_summary,
+        symbolic_law=symbolic_law,
+        log_context=log_context,
+    )
+    if hasattr(episode, "bind_llm_context"):
+        episode.bind_llm_context(llm_context_result)

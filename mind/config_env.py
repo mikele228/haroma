@@ -1,4 +1,7 @@
-"""Shared environment-variable readers for HaromaX6 (no framework deps)."""
+"""Shared environment-variable readers for HaromaX6 (no framework deps).
+
+Grouped keys and named settings: :mod:`mind.haroma_settings`.
+"""
 
 from __future__ import annotations
 

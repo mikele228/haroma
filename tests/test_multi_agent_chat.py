@@ -18,6 +18,8 @@ import threading
 import time
 from typing import TYPE_CHECKING
 
+import pytest
+
 _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO not in sys.path:
     sys.path.insert(0, _REPO)
@@ -63,7 +65,7 @@ def banner(text):
 
 
 def test_boot(boot: BootAgent):
-    """Session fixture already booted TrueSelf + 2 personas; assert invariants."""
+    """Session fixture already booted TrueSelf + configured personas; assert invariants."""
     banner("TEST 1: Boot Multi-Agent System (v6 TrueSelf)")
 
     shared = boot.shared
@@ -149,6 +151,13 @@ def test_fast_path(boot: BootAgent):
 
 def test_delegation(boot: BootAgent):
     """Send a specialist message -- TrueSelf should delegate to Analyst."""
+    persona_ids = {p.agent_id for p in boot.persona_agents}
+    if "analyst" not in persona_ids:
+        pytest.skip(
+            "Delegation test needs an 'analyst' persona in soul/agents.json "
+            "(see scripts/soul_defaults/agents.json initial_personas)"
+        )
+
     banner("TEST 4: TrueSelf Delegation (specialist message)")
 
     input_agent = boot.input_agent

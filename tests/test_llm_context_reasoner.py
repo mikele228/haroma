@@ -324,6 +324,16 @@ class TestParseResponse:
         assert result.source == "llm_nonjson_reply"
         assert "not json" in (result.answer or "")
 
+    def test_nonjson_repetitive_suffix_trimmed(self):
+        """Degenerate decode: same block repeated; keep a single copy."""
+        unit = "I'm fine. How are you? "
+        junk = unit * 12
+        result = parse_response(junk)
+        assert result.source == "llm_nonjson_reply"
+        assert result.answer is not None
+        assert unit.strip() in result.answer
+        assert result.answer.count("How are you?") <= 2
+
     def test_json_strict_rejects_plaintext(self, monkeypatch):
         monkeypatch.setenv("HAROMA_LLM_JSON_STRICT", "1")
         result = parse_response("Hello, this is a plain assistant reply.")
@@ -416,7 +426,8 @@ class TestRunLLMContextReasoning:
         assert result.source == "dummy_probe"
         assert result.answer == "Testing reply"
 
-    def test_with_mock_backend(self):
+    def test_with_mock_backend(self, monkeypatch):
+        monkeypatch.setenv("HAROMA_LLM_DUMMY_REPLY", "0")
         backend = MagicMock()
         backend.available = True
         backend.generate_chat.return_value = json.dumps(
@@ -445,7 +456,30 @@ class TestRunLLMContextReasoning:
         assert result.latency_ms > 0
         backend.generate_chat.assert_called_once()
 
-    def test_backend_returns_none(self):
+    def test_payload_logging_emits_json_lines(self, monkeypatch, capsys):
+        monkeypatch.setenv("HAROMA_LLM_DUMMY_REPLY", "0")
+        monkeypatch.setenv("HAROMA_LLM_LOG_PAYLOAD", "1")
+        backend = MagicMock()
+        backend.available = True
+        backend._n_ctx = 4096
+        backend.generate_chat.return_value = '{"answer":"x","confidence":1}'
+        run_llm_context_reasoning(
+            llm_backend=backend,
+            user_text="hi",
+            recalled_memories=[],
+            identity_summary=_IDENTITY,
+            personality_summary={},
+            active_goals=[],
+            law_summary={},
+            value_summary={},
+        )
+        out = capsys.readouterr().out
+        assert "PAYLOAD_IN" in out and '"kind": "PAYLOAD_IN"' in out
+        assert "PAYLOAD_OUT" in out and '"kind": "PAYLOAD_OUT"' in out
+        assert '{"answer":"x"' in out or "answer" in out
+
+    def test_backend_returns_none(self, monkeypatch):
+        monkeypatch.setenv("HAROMA_LLM_DUMMY_REPLY", "0")
         backend = MagicMock()
         backend.available = True
         backend.generate_chat.return_value = None

@@ -139,7 +139,8 @@ class TestBuildMessagesLLMCentric:
 
 
 class TestRunLLMCentric:
-    def test_llm_centric_passes_through(self):
+    def test_llm_centric_passes_through(self, monkeypatch):
+        monkeypatch.setenv("HAROMA_LLM_DUMMY_REPLY", "0")
         backend = MagicMock()
         backend.available = True
         backend.generate_chat.return_value = _FULL_LLM_RESPONSE

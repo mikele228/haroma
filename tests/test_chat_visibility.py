@@ -10,6 +10,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from mind.cognitive_contracts import (
     CHAT_RESPONSE_LLM_TIMEOUT,
     CHAT_RESPONSE_UNKNOWN,
+    LLM_CONTEXT_SOURCES_PREFER_PACKED_ANSWER,
     normalize_http_chat_response,
     resolve_chat_visible_text,
 )
@@ -147,3 +148,15 @@ def test_normalize_recovers_from_unknown_with_identity_context():
     assert r["response"] == "I'm Elarion."
     assert "_chat_resolve_user_text" not in r
     assert "_chat_resolve_identity" not in r
+
+
+def test_llm_context_sources_prefer_packed_answer_stable():
+    """Single source of truth for ``resolve_chat_visible_text`` vs PersonaAgent merge."""
+    assert LLM_CONTEXT_SOURCES_PREFER_PACKED_ANSWER == frozenset(
+        (
+            "llm_context_reasoning",
+            "chat_only",
+            "dummy_probe",
+            "llm_nonjson_reply",
+        )
+    )

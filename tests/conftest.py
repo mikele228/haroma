@@ -40,6 +40,16 @@ if TYPE_CHECKING:
 
 
 @pytest.fixture(autouse=True)
+def _isolate_haroma_llm_dummy_reply_env(monkeypatch):
+    """Clear ``HAROMA_LLM_DUMMY_REPLY`` so repo ``.env`` does not leak into unit tests.
+
+    Tests that need dummy or synthetic LLM must ``setenv`` / ``delenv`` explicitly.
+    """
+    monkeypatch.delenv("HAROMA_LLM_DUMMY_REPLY", raising=False)
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _isolate_lab_and_rate_limit_state():
     """Reset global lab event ring and HTTP rate-limit buckets between tests."""
     from mind.client_ip import clear_trusted_proxy_cache_for_tests
@@ -62,7 +72,12 @@ def boot() -> "BootAgent":
     shared = b.boot()
     assert shared is not None, "SharedResources is None"
     assert b.trueself_agent is not None, "TrueSelf not spawned"
-    assert len(b.persona_agents) == 2, f"Expected 2 personas, got {len(b.persona_agents)}"
+    _cfg = shared.agent_config or {}
+    _expected_personas = len(_cfg.get("initial_personas", []) or [])
+    assert len(b.persona_agents) == _expected_personas, (
+        f"Expected {_expected_personas} persona(s) from initial_personas, "
+        f"got {len(b.persona_agents)}"
+    )
 
     b.input_agent.set_boot_agent(b)
     b.trueself_agent.set_boot_agent(b)

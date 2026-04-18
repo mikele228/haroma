@@ -52,6 +52,11 @@ Each cycle binds ``episode.brain_like_state`` (arousal / exploration / stability
 plasticity / consolidation pressure) — see ``mind.humanoid_brain_state``. Optional
 ``HAROMA_BRAIN_STATE_LOG=1`` prints one line. Outcome-grounded belief updates scale
 with ``plasticity_index`` when ``HAROMA_BRAIN_PLASTICITY_COUPLING=1`` (default).
+
+**Packed-context LLM:** This agent calls :func:`~mind.cycle_flow.run_llm_context_reasoning_phase`
+when gates allow (see :mod:`mind.packed_llm_cycle_inputs` and :mod:`mind.cognitive_entrypoints`).
+The embedded :class:`~mind.control.ElarionController` does **not** run that phase; chat HTTP
+responses depend on this path for ``episode.llm_context``.
 """
 
 from __future__ import annotations
@@ -71,15 +76,25 @@ from utils.coerce_bool import env_flag, json_bool
 
 from agents.base import BaseAgent
 from agents.chat_latency import (
-    packed_llm_dummy_probe_active,
-    packed_llm_dummy_reply_raw,
     trace_attach_to_payload,
     trace_span,
 )
 from agents.message_bus import Message, MessageBus
 from mind.cognitive_contracts import (
-    merge_deliberative_into_llm_context,
+    build_agent_state_json_for_packed_llm,
+    build_llm_centric_action,
+    build_packed_llm_cycle_inputs,
+    chat_llm_primary_env_enabled,
+    complete_deferred_deliberative_llm_context,
+    discourse_context_for_packed_llm,
+    invoke_run_llm_context_reasoning_phase,
+    llm_centric_enabled_for_persona_cycle,
+    merge_packed_llm_answer_into_action,
+    optional_llm_structured_fields,
+    packed_llm_before_llm_log_detail,
+    read_multi_goal_deliberative_env,
     resolve_chat_visible_text,
+    summarize_law_value_managers,
 )
 from mind.user_identity import sanitize_user_id, speaker_key, user_tag
 from mind.chat_pipeline_log import log_input_pipeline, trace_id_from_message
@@ -106,30 +121,26 @@ from core.cognitive_null import is_cognitive_null
 from core.self_model_train_batch import SelfModelTrainBatch
 from core.derivation_merge import merge_derivation_artifacts
 from mind.environment_context import propose_structured_actions
-from mind.packed_llm_context import optional_llm_structured_fields
 from mind.humanoid_brain_state import compute_brain_like_state, maybe_log_brain_state
 from mind.outcome_belief_update import (
     apply_outcome_grounded_belief_updates,
     deliberative_belief_outcome_multiplier,
 )
 from mind.cycle_flow import (
+    ORGANIC_PACKED_LLM_SKIP_THRESHOLD,
+    TRACE_LABEL_PERSONA_PACKED_LLM,
     build_action_episode_payload,
     build_counterfactual_gate_features,
     build_law_tags,
-    build_trueself_state_snapshot,
     resolve_strategy_hint,
     run_counterfactual_phase,
     run_curiosity_phase,
     run_deliberative_action,
     run_imagination_phase,
     run_law_value_myth_sidecar_phase,
-    run_llm_context_reasoning_phase,
     run_metacognition_phase,
     run_multi_goal_deliberative_actions,
     run_reasoning_phase,
-    organic_confidence,
-    serialize_state_snapshot,
-    ORGANIC_PACKED_LLM_SKIP_THRESHOLD,
     workspace_contents_as_dicts,
 )
 
@@ -1319,16 +1330,11 @@ class PersonaAgent(BaseAgent):
 
         # LLM-centric / board goal-voice: consult packed LLM only when there is
         # no active board mandate (CEO executing). Disabled on internal cycles.
-        _llm_centric_cfg = os.environ.get("HAROMA_LLM_CENTRIC", "0") not in ("0", "false", "")
-        _gb_early = getattr(s, "goal_board", None)
-        _mandate_active_early = (
-            _gb_early.has_active_mandate() if _gb_early is not None else False
-        )
-        _llm_centric = (
-            _llm_centric_cfg
-            and not is_internal
-            and not _mandate_active_early
-            and (not _trueself_agent or _user_or_traced_turn)
+        _llm_centric = llm_centric_enabled_for_persona_cycle(
+            is_internal=is_internal,
+            trueself_agent=_trueself_agent,
+            user_or_traced_turn=_user_or_traced_turn,
+            goal_board=getattr(s, "goal_board", None),
         )
         _memory_forest_seed = ""
 
@@ -1711,185 +1717,99 @@ class PersonaAgent(BaseAgent):
         # for a long time; holding the lock stalls encoder and background train.)
         _law_mgr = getattr(s, "law", None)
         _val_mgr = getattr(s, "value", None)
-        _utt = text or content or ""
-        _organic = organic_confidence(
+        _pl = build_packed_llm_cycle_inputs(
+            text=text,
+            content=content,
+            llm_centric=_llm_centric,
+            chat_llm_primary=_chat_llm_primary,
+            role=role,
+            has_external=has_external,
+            is_internal=is_internal,
+            trueself_agent=_trueself_agent,
+            user_or_traced_turn=_user_or_traced_turn,
+            gate_reasoning=_gate_decisions.get("reasoning", True),
+            over_budget=_over_budget(),
+            deliberative_flag=deliberative_flag,
             recalled_memories=episode.recalled_memories,
             reasoning_result=reasoning_result,
             appraisal_result=appraisal_result,
+            organic_skip_threshold=ORGANIC_PACKED_LLM_SKIP_THRESHOLD,
+            knowledge_summary=knowledge_summary,
+            knowledge_graph=s.knowledge,
+            nlu_result=nlu_result,
         )
-        _user_message = bool(str(_utt).strip())
-        _packed_llm_eligible = _user_message and (
-            not _trueself_agent or _user_or_traced_turn
-        )
-        _conversant_chat = (
-            role == "conversant" and has_external and _packed_llm_eligible and not is_internal
-        )
+        _utt = _pl.user_text
+        _path = _pl.path
+        _packed_llm_eligible = _path.packed_llm_eligible
+        _conversant_chat = _path.conversant_chat
         # Packed LLM (or synthetic dummy when no model): same gates for all cycle_depth /
         # sensor modes — ``cycle_depth`` is metadata only for tracing/budgets, not LLM wiring.
-        _llm_primary_path = _chat_llm_primary and _conversant_chat
-        _llm_classic_path = (
-            not is_internal
-            and _packed_llm_eligible
-            and _gate_decisions.get("reasoning", True)
-            and not _over_budget()
-            and _organic < ORGANIC_PACKED_LLM_SKIP_THRESHOLD
-        )
-
-        # Cap packed ``generate_chat`` wait (all modes). Set ``HAROMA_FAST_LLM_TIMEOUT_SEC``
-        # or ``HAROMA_FAST_LLM_DEFAULT_TIMEOUT_SEC``; ``0`` falls back to global
-        # ``HAROMA_LLM_CONTEXT_TIMEOUT_SEC``.
-        _fast_llm_t_raw = str(os.environ.get("HAROMA_FAST_LLM_TIMEOUT_SEC", "") or "").strip()
-
-        _kg_for_llm = None
-        # LLMContextReasoner skips full build_messages when dummy (no FULL_PACK) or
-        # HAROMA_LLM_CHAT_ONLY — avoid expensive KG selection in those cases.
-        _skip_full_pack_inputs = (
-            env_flag("HAROMA_LLM_CHAT_ONLY", False)
-            or (
-                env_flag("HAROMA_LLM_DUMMY_REPLY", False)
-                and not env_flag("HAROMA_LLM_DUMMY_FULL_PACK", False)
-            )
-        )
-        if (
-            (_llm_centric or _llm_primary_path or _llm_classic_path)
-            and not _skip_full_pack_inputs
-        ):
-            try:
-                from engine.LanguageComposer import LanguageComposer
-
-                _nlu_names = [
-                    e.get("text", "")
-                    for e in (nlu_result.get("entities", []) if nlu_result else [])
-                ]
-                _kg_for_llm = LanguageComposer.select_relevant_triples(
-                    knowledge_summary, s.knowledge, _nlu_names
-                )
-            except Exception:
-                _kg_for_llm = None
-        _llm_ctx_enabled = _llm_centric or _llm_primary_path or _llm_classic_path
-        _llm_timeout_override: Optional[float] = None
-        if _fast_llm_t_raw:
-            try:
-                _llm_timeout_override = float(_fast_llm_t_raw)
-            except (TypeError, ValueError):
-                _llm_timeout_override = None
-        else:
-            try:
-                from mind.config_env import env_float
-
-                _fd = env_float("HAROMA_FAST_LLM_DEFAULT_TIMEOUT_SEC", 120.0)
-                _llm_timeout_override = None if _fd <= 0.0 else _fd
-            except Exception:
-                _llm_timeout_override = 120.0
-        if (
-            _llm_ctx_enabled
-            and _trueself_agent
-            and _user_or_traced_turn
-            and not is_internal
-        ):
-            _ts_llm = str(os.environ.get("HAROMA_TRUESELF_USER_CHAT_LLM_TIMEOUT_SEC", "") or "").strip()
-            if _ts_llm:
-                try:
-                    _tov_ts = float(_ts_llm)
-                    if _tov_ts > 0:
-                        if _llm_timeout_override is None:
-                            _llm_timeout_override = _tov_ts
-                        else:
-                            _llm_timeout_override = min(_llm_timeout_override, _tov_ts)
-                except (TypeError, ValueError):
-                    pass
+        _llm_primary_path = _path.llm_primary_path
+        _llm_classic_path = _path.llm_classic_path
+        _llm_ctx_enabled = _path.llm_ctx_enabled
+        _skip_full_pack_inputs = _pl.skip_full_pack_messages
+        _kg_for_llm = _pl.kg_triples
+        _llm_timeout_override: Optional[float] = _pl.timeout_override
         llm_context_result: Dict[str, Any] = {"source": "skipped"}
         # Defer episode.bind_llm_context until after deliberative merge when both run,
         # so we only touch episode.llm_context once per cycle for that path.
-        _defer_llm_bind = bool(deliberative_flag and _llm_ctx_enabled)
+        _defer_llm_bind = _pl.defer_episode_bind
 
-        _law_sum = _law_mgr.summarize() if _is_real_module(_law_mgr) else {}
-        _val_sum = _val_mgr.summarize() if _is_real_module(_val_mgr) else {}
+        _law_sum, _val_sum = summarize_law_value_managers(_law_mgr, _val_mgr)
 
-        _agent_state_json = ""
-        if deliberative_flag and _llm_ctx_enabled:
-            _val_prompt = {}
-            try:
-                _dc = getattr(_val_mgr, "engine", None)
-                if _dc is not None and hasattr(_dc, "summarize_for_prompt"):
-                    _val_prompt = _dc.summarize_for_prompt()
-                else:
-                    _val_prompt = _val_sum
-            except Exception:
-                _val_prompt = _val_sum
-            _sensors = []
-            try:
-                _ia = getattr(s, "_input_agent_ref", None)
-                if _ia is None and hasattr(self, "_boot_agent_ref"):
-                    _ba = getattr(self, "_boot_agent_ref", None)
-                    if _ba is not None:
-                        _ia = getattr(_ba, "input_agent", None)
-                if _ia is not None and hasattr(_ia, "peek_sensor_queue"):
-                    _sensors = _ia.peek_sensor_queue(32)
-            except Exception:
-                pass
-            _snap = build_trueself_state_snapshot(
-                sensors=_sensors,
-                identity_summary=identity_summary,
-                personality_summary=personality_summary,
-                active_goals=active_goals,
-                law_summary=_law_sum,
-                value_summary=_val_prompt,
-                drives=episode.drives if hasattr(episode, "drives") else None,
-                affect=episode.affect,
-            )
-            _agent_state_json = serialize_state_snapshot(_snap)
-
-        _discourse_llm = (
-            self.conversation.get_context_summary(_speaker_key if _session_uid else None)
-            if self.conversation.is_in_conversation(cycle_id)
-            else ""
+        _agent_state_json = build_agent_state_json_for_packed_llm(
+            deliberative_flag=deliberative_flag,
+            llm_ctx_enabled=_llm_ctx_enabled,
+            law_summary=_law_sum,
+            val_mgr=_val_mgr,
+            value_summary=_val_sum,
+            state=s,
+            boot_agent_ref=getattr(self, "_boot_agent_ref", None),
+            identity_summary=identity_summary,
+            personality_summary=personality_summary,
+            active_goals=active_goals,
+            episode=episode,
         )
-        if _first_encounter_asks_name:
-            _enc_hint = (
-                "[Discourse note: First exchange with this client identity. "
-                "Greet briefly; if they have not introduced themselves, "
-                "ask what they would like you to call them.]"
-            )
-            _discourse_llm = (_discourse_llm + " | " + _enc_hint) if _discourse_llm else _enc_hint
 
-        _dum_raw = packed_llm_dummy_reply_raw()
+        _discourse_llm = discourse_context_for_packed_llm(
+            self.conversation,
+            cycle_id=cycle_id,
+            speaker_key=_speaker_key,
+            session_uid=bool(_session_uid),
+            first_encounter_asks_name=_first_encounter_asks_name,
+        )
+
         if cognitive_phases_enabled():
             yield COGNITIVE_PHASE_PRE_LLM
 
         log_input_pipeline(
             "persona.before_packed_llm",
             trace_id=_pipe_tid,
-            detail=(
-                f"agent={self.agent_id} role={role} llm_enabled={_llm_ctx_enabled} "
-                f"dummy_env={packed_llm_dummy_probe_active()} "
-                f"HAROMA_LLM_DUMMY_REPLY={_dum_raw!r}"
+            detail=packed_llm_before_llm_log_detail(
+                agent_id=self.agent_id,
+                role=role,
+                llm_ctx_enabled=_llm_ctx_enabled,
             ),
         )
         self._before_llm_context_io(_llm_ctx_enabled, role)
         try:
-            llm_context_result = run_llm_context_reasoning_phase(
-                enabled=_llm_ctx_enabled,
+            llm_context_result = invoke_run_llm_context_reasoning_phase(
+                pl=_pl,
                 llm_backend=s.llm_backend,
-                user_text=_utt,
-                recalled_memories=episode.recalled_memories,
+                episode=episode,
+                memory_forest=s.memory,
                 identity_summary=identity_summary,
                 personality_summary=personality_summary,
                 active_goals=active_goals,
                 law_summary=_law_sum,
                 value_summary=_val_sum,
-                knowledge_triples=_kg_for_llm,
                 discourse_context=_discourse_llm,
                 nlu_result=nlu_result,
                 memory_forest_seed=_memory_forest_seed,
                 llm_centric=_llm_centric,
-                episode=episode,
-                memory_forest=s.memory,
-                trace_label="13.2b.llm_context_reasoning",
-                timeout_override=_llm_timeout_override,
                 deliberative=deliberative_flag,
                 agent_state_json=_agent_state_json,
-                bind_episode=not _defer_llm_bind,
+                trace_label=TRACE_LABEL_PERSONA_PACKED_LLM,
             )
         finally:
             self._after_llm_context_io(_llm_ctx_enabled, role)
@@ -1899,27 +1819,16 @@ class PersonaAgent(BaseAgent):
             yield COGNITIVE_PHASE_POST_LLM
 
         if _defer_llm_bind:
-            _vals: Dict[str, Any] = {}
-            if _is_real_module(_val_mgr):
-                try:
-                    _vals = dict(getattr(_val_mgr.engine, "values", {}) or {})
-                except Exception:
-                    _vals = {}
-            _sym_law = getattr(episode, "symbolic_law", None)
-            _sl = _sym_law if isinstance(_sym_law, dict) else None
-            merge_deliberative_into_llm_context(
+            complete_deferred_deliberative_llm_context(
                 llm_context_result,
-                deliberative_flag=bool(deliberative_flag),
-                current_values=_vals,
+                deliberative_flag=deliberative_flag,
+                val_mgr=_val_mgr,
+                episode=episode,
                 active_goals=active_goals,
                 drive_state=drive_state,
-                episode_affect=getattr(episode, "affect", None),
                 emotion_summary=emotion_summary,
-                symbolic_law=_sl,
                 log_context=f" Persona:{self.agent_id}",
             )
-            if hasattr(episode, "bind_llm_context"):
-                episode.bind_llm_context(llm_context_result)
 
         # Post-LLM phases: counterfactual → response run without holding the neural RW
         # lock (short locks only for self_model / backbone / composer weight touches).
@@ -2034,37 +1943,17 @@ class PersonaAgent(BaseAgent):
         _utter_style = "conversational" if role == "conversant" else None
 
         _llm_answer = llm_context_result.get("answer")
-        _multi_goal = str(
-            os.environ.get("HAROMA_MULTI_GOAL_PER_CYCLE", "0") or "0",
-        ).strip().lower() in ("1", "true", "yes", "on")
-        try:
-            _max_cycle_goals = max(
-                1,
-                int(os.environ.get("HAROMA_MAX_CYCLE_GOALS", "3") or 3),
-            )
-        except (TypeError, ValueError):
-            _max_cycle_goals = 3
-        try:
-            _max_actions_per_goal = max(
-                1,
-                int(os.environ.get("HAROMA_MAX_ACTIONS_PER_GOAL", "2") or 2),
-            )
-        except (TypeError, ValueError):
-            _max_actions_per_goal = 2
+        _mg_env = read_multi_goal_deliberative_env()
+        _multi_goal = _mg_env.enabled
+        _max_cycle_goals = _mg_env.max_cycle_goals
+        _max_actions_per_goal = _mg_env.max_actions_per_goal
 
         if _llm_centric and _llm_answer:
-            action = {
-                "text": str(_llm_answer).strip(),
-                "action_type": "respond" if is_conv else "reflect",
-                "strategy": "llm_context",
-                "composition": None,
-                "deliberation": {"candidates": [], "winner": "llm_centric"},
-                "confidence": llm_context_result.get("confidence", 0.5),
-                "reasoning": "llm_centric_direct",
-                "law_bound": False,
-                "symbolic_law": {"compliant": True, "violation_count": 0},
-                "timestamp": time.time(),
-            }
+            action = build_llm_centric_action(
+                llm_answer=_llm_answer,
+                llm_context_result=llm_context_result,
+                is_in_conversation=is_conv,
+            )
             episode.bind_multi_goal_actions([])
         elif _multi_goal and active_goals:
             _batch = active_goals[:_max_cycle_goals]
@@ -2116,21 +2005,13 @@ class PersonaAgent(BaseAgent):
             )
             episode.bind_multi_goal_actions([])
 
-        # Primary packed LLM already ran; do not let deliberative placeholder text win in
-        # ``resolve_chat_visible_text`` (it prefers non-empty ``action[\"text\"]`` before
-        # ``llm_context[\"answer\"]`` unless source matches the visibility branches).
-        if _llm_primary_path and not _llm_centric:
-            _plm_src = str(llm_context_result.get("source") or "").strip().lower()
-            _plm_ans = str(llm_context_result.get("answer") or "").strip()
-            if _plm_ans and _plm_src in (
-                "llm_context_reasoning",
-                "chat_only",
-                "dummy_probe",
-                "llm_nonjson_reply",
-            ):
-                action = dict(action)
-                action["text"] = _plm_ans
-                action["strategy"] = "llm_context"
+        # Primary packed LLM already ran; align ``action[\"text\"]`` with :mod:`mind.chat_visibility`.
+        action = merge_packed_llm_answer_into_action(
+            action,
+            llm_context_result,
+            llm_primary_path=_llm_primary_path,
+            llm_centric=_llm_centric,
+        )
 
         _st = _step_time("14-action_generation")
 

@@ -108,6 +108,11 @@ from mind.cycle_flow import (
     workspace_contents_as_dicts,
     write_processor_symbolic_queue,
 )
+from mind.deliberative_cycle_env import read_multi_goal_deliberative_env
+from mind.packed_llm_controller_bridge import (
+    controller_packed_llm_enabled,
+    run_packed_llm_phase_for_elarion_controller,
+)
 from mind.cognitive_trace import (
     CognitiveTraceRecorder,
     apply_ablation_overrides,
@@ -124,6 +129,17 @@ from core.cognitive_null import CognitiveNull, is_cognitive_null
 
 
 class ElarionController:
+    """Single-process cognitive loop (embedded / library use).
+
+    By default this class **does not** call :func:`~mind.cycle_flow.run_llm_context_reasoning_phase`.
+    Set ``HAROMA_CONTROLLER_PACKED_LLM=1`` to run the same 13.2b packed-context LLM step as
+    :class:`~agents.persona_agent.PersonaAgent` after symbolic reasoning (see
+    :mod:`mind.packed_llm_controller_bridge`).
+    (packed-context ``generate_chat``). That path lives on
+    :class:`~agents.persona_agent.PersonaAgent` for multi-agent chat. See
+    :mod:`mind.cognitive_entrypoints`.
+    """
+
     def __init__(self):
         # ── Resource detection: auto-scale everything to available hardware ──
         self.resource_config: ResourceConfig = detect_resources()
@@ -1063,6 +1079,25 @@ class ElarionController:
             trace_label="13.2.reasoning_law",
         )
 
+        # ── 13.2b. PACKED-CONTEXT LLM (opt-in; same phase as PersonaAgent) ─
+        if controller_packed_llm_enabled():
+            run_packed_llm_phase_for_elarion_controller(
+                self,
+                episode,
+                role=role,
+                content=content,
+                text=content,
+                has_external=bool(has_external),
+                gate_reasoning=_gate_decisions.get("reasoning", True),
+                reasoning_result=reasoning_result,
+                appraisal_result=appraisal_result,
+                active_goals=active_goals,
+                identity_summary=identity_summary,
+                nlu_result=nlu_result,
+                knowledge_summary=knowledge_summary,
+                cycle_id=self.cycle_count,
+            )
+
         # ── 13.3. COUNTERFACTUAL REASONING (with learned gate) ───────
         counterfactual_result: Dict[str, Any] = {"counterfactual_depth": 0, "branches": []}
         _cf_features: List[float] = []
@@ -1218,23 +1253,10 @@ class ElarionController:
 
         _t_pre_action = time.time() - _t0
         _t_action_start = time.time()
-        _multi_goal = str(
-            os.environ.get("HAROMA_MULTI_GOAL_PER_CYCLE", "0") or "0",
-        ).strip().lower() in ("1", "true", "yes", "on")
-        try:
-            _max_cycle_goals = max(
-                1,
-                int(os.environ.get("HAROMA_MAX_CYCLE_GOALS", "3") or 3),
-            )
-        except (TypeError, ValueError):
-            _max_cycle_goals = 3
-        try:
-            _max_actions_per_goal = max(
-                1,
-                int(os.environ.get("HAROMA_MAX_ACTIONS_PER_GOAL", "2") or 2),
-            )
-        except (TypeError, ValueError):
-            _max_actions_per_goal = 2
+        _mg_env = read_multi_goal_deliberative_env()
+        _multi_goal = _mg_env.enabled
+        _max_cycle_goals = _mg_env.max_cycle_goals
+        _max_actions_per_goal = _mg_env.max_actions_per_goal
 
         if _multi_goal and active_goals:
             _batch = active_goals[:_max_cycle_goals]
