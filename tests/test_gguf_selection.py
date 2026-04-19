@@ -1,6 +1,5 @@
 """GGUF auto-selection prefers smaller files when quant rank ties."""
 
-import os
 
 import pytest
 

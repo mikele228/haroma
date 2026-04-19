@@ -241,7 +241,6 @@ if _TORCH:
         ) -> torch.Tensor:
             if snapshot.dim() == 1:
                 snapshot = snapshot.unsqueeze(0)
-            batch_size = snapshot.shape[0]
             seq_len = snapshot.shape[1]
 
             tokens = self._scalar_proj(snapshot.unsqueeze(-1))

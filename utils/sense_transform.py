@@ -1,5 +1,3 @@
-import base64
-from io import BytesIO
 
 try:
     import numpy as np

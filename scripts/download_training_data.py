@@ -24,12 +24,10 @@ import os
 import sys
 import json
 import gzip
-import csv
 import time
 import hashlib
 import urllib.request
 import zipfile
-import io
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
@@ -515,7 +513,6 @@ def _fallback_dailydialog():
         samples = []
         for row in ds:
             turns = row.get("dialog", [])
-            acts = row.get("act", [])
             emotions = row.get("emotion", [])
             for j, turn in enumerate(turns):
                 turn = turn.strip()

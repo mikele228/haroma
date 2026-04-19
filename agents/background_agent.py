@@ -25,6 +25,8 @@ does not need to happen in the critical path of a conversation:
 
   - Recall: ``HAROMA_WEB_LEARN_INJECT_MODE`` / ``HAROMA_WEB_LEARN_INJECT_MAX`` (see
     ``core/chat_recall_policy``) control when crawled web text is merged into recall.
+
+  - ``cmem`` tree: optional consolidated nodes for fast recall (see ``HAROMA_CMEM_*``).
 """
 
 from __future__ import annotations
@@ -33,7 +35,7 @@ import json
 import os
 import random
 import time
-from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, Set, Tuple, TYPE_CHECKING
 
 _BG_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _DIALOG_TRAINING_JSON = os.path.join(_BG_ROOT, "data", "training", "dialog_training.json")
@@ -41,7 +43,11 @@ _DIALOG_LINE_CACHE: Optional[List[str]] = None
 
 from agents.base import BaseAgent
 from agents.message_bus import Message, MessageBus
-from mind.chat_priority import chat_input_priority_defer_non_user, input_pipeline_busy
+from mind.chat_priority import (
+    background_input_active,
+    chat_input_priority_defer_non_user,
+    input_pipeline_busy,
+)
 from utils.coerce_bool import env_flag
 
 from core.Memory import MemoryNode
@@ -208,11 +214,31 @@ class BackgroundAgent(BaseAgent):
             )
 
         _tick_err: Optional[str] = None
+        _pause_heavy = env_flag("HAROMA_BG_PAUSE_ON_ACTIVE_INPUT", True) and background_input_active(
+            s, self._boot_agent
+        )
         try:
             # -- 1. Process dead-letter messages ---------------------------
             self._process_dead_letters()
 
-            if chat_input_priority_defer_non_user(s, self._boot_agent):
+            # cmem: skip while HTTP /chat (or other active input) is in flight — promoting
+            # nodes indexes the forest and contends on SBERT encode_lock / semantic index with
+            # PersonaAgent recall_fast. Set HAROMA_CMEM_BUILD_DURING_ACTIVE_INPUT=1 to restore
+            # always-on cmem during active input (higher latency risk).
+            _cmem_during_active = env_flag("HAROMA_CMEM_BUILD_DURING_ACTIVE_INPUT", False)
+
+            if _pause_heavy:
+                if _cmem_during_active:
+                    self._maybe_build_cmem(tc)
+                if s.persistence and s.persistence.should_save(s.cycle_count):
+                    self._save()
+                if _hb:
+                    print(
+                        "[BackgroundAgent] tick_skipped heavy_work reason=active_input "
+                        "(HAROMA_BG_PAUSE_ON_ACTIVE_INPUT=1)",
+                        flush=True,
+                    )
+            elif chat_input_priority_defer_non_user(s, self._boot_agent):
                 if s.persistence and s.persistence.should_save(s.cycle_count):
                     self._save()
             else:
@@ -251,6 +277,9 @@ class BackgroundAgent(BaseAgent):
                 # -- 5b. Web learn (allowlist fetch → memory) -------------------
                 if _do_web:
                     self._run_web_learn()
+
+                # -- 5c. cmem (consolidated recall index) ----------------------
+                self._maybe_build_cmem(tc)
 
                 # -- 6. Persistence save ---------------------------------------
                 if s.persistence and s.persistence.should_save(s.cycle_count):
@@ -941,6 +970,149 @@ class BackgroundAgent(BaseAgent):
         except Exception as exc:
             print(f"[BackgroundAgent] Goal synthesis error: {exc}", flush=True)
 
+    def _cmem_existing_source_ids(self, mem: Any) -> Set[str]:
+        """Source thought ids already copied to ``cmem`` (``cmem_src|…`` or legacy ``source:``)."""
+        out: Set[str] = set()
+        tree = mem.trees.get("cmem")
+        if not tree:
+            return out
+        for branch in tree.branches.values():
+            for node in branch.nodes:
+                for t in node.tags or []:
+                    if not isinstance(t, str):
+                        continue
+                    if t.startswith("cmem_src|"):
+                        out.add(t.split("|", 1)[1])
+                    elif t.startswith("source:"):
+                        out.add(t.split(":", 1)[1])
+        return out
+
+    def _cmem_total_nodes(self, mem: Any) -> int:
+        tree = mem.trees.get("cmem")
+        if not tree:
+            return 0
+        return sum(len(b.nodes) for b in tree.branches.values())
+
+    def _promote_cmem_from_thought_tree(self, mem: Any, max_new: int) -> int:
+        """Copy up to *max_new* non-empty ``thought_tree`` nodes into ``cmem``."""
+        thought = mem.trees.get("thought_tree")
+        if not thought or not thought.branches or max_new <= 0:
+            return 0
+        existing = self._cmem_existing_source_ids(mem)
+        added = 0
+        for branch_name, branch in thought.branches.items():
+            if added >= max_new:
+                break
+            if not branch.nodes:
+                continue
+            tail = branch.nodes[-48:] if len(branch.nodes) > 48 else branch.nodes
+            for node in reversed(tail):
+                if added >= max_new:
+                    break
+                if node.moment_id in existing:
+                    continue
+                raw = (node.content or "").strip()
+                if not raw:
+                    continue
+                text = raw[:400] + ("..." if len(raw) > 400 else "")
+                cn = MemoryNode(
+                    content=f"[cmem] {text}",
+                    emotion=node.emotion,
+                    confidence=min(1.0, max(0.35, float(node.confidence or 0.5))),
+                    tags=[
+                        "cmem",
+                        "consolidated",
+                        f"cmem_src|{node.moment_id}",
+                    ],
+                )
+                try:
+                    mem.add_node("cmem", branch_name, cn)
+                except Exception as exc:
+                    print(f"[BackgroundAgent] cmem add_node error: {exc}", flush=True)
+                    continue
+                existing.add(node.moment_id)
+                added += 1
+        return added
+
+    def _maybe_build_cmem(self, tc: int) -> None:
+        """Promote recent ``thought_tree`` lines into ``cmem`` for tree-filtered recall."""
+        from mind.haroma_settings import (
+            haroma_cmem_build_enabled,
+            haroma_cmem_build_every_n_ticks,
+            haroma_cmem_build_max_nodes_per_tick,
+            haroma_cmem_max_total_nodes,
+        )
+
+        s = self.shared
+        if not _is_real(s.memory):
+            return
+        if not haroma_cmem_build_enabled():
+            return
+        if tc % haroma_cmem_build_every_n_ticks() != 0:
+            return
+        mem = s.memory
+        thought = mem.trees.get("thought_tree")
+        if not thought or not thought.branches:
+            return
+        max_total = haroma_cmem_max_total_nodes()
+        if max_total > 0:
+            self._prune_cmem_to_budget(mem, max_total)
+        self._promote_cmem_from_thought_tree(mem, haroma_cmem_build_max_nodes_per_tick())
+        if max_total > 0:
+            self._prune_cmem_to_budget(mem, max_total)
+
+    def bootstrap_cmem_if_needed(self) -> None:
+        """One-time fill when ``cmem`` is empty so recall is not blocked before background ticks."""
+        from mind.haroma_settings import (
+            haroma_cmem_bootstrap_max_nodes,
+            haroma_cmem_build_enabled,
+            haroma_cmem_max_total_nodes,
+        )
+
+        s = self.shared
+        if not _is_real(s.memory):
+            return
+        if not haroma_cmem_build_enabled():
+            return
+        mem = s.memory
+        if self._cmem_total_nodes(mem) > 0:
+            return
+        thought = mem.trees.get("thought_tree")
+        if not thought or not thought.branches:
+            return
+        max_total = haroma_cmem_max_total_nodes()
+        if max_total > 0:
+            self._prune_cmem_to_budget(mem, max_total)
+        n = self._promote_cmem_from_thought_tree(mem, haroma_cmem_bootstrap_max_nodes())
+        if n:
+            print(
+                f"[BackgroundAgent] cmem bootstrap: promoted {n} node(s) from thought_tree",
+                flush=True,
+            )
+        if max_total > 0:
+            self._prune_cmem_to_budget(mem, max_total)
+
+    def _prune_cmem_to_budget(self, mem: Any, max_total: int) -> None:
+        """Remove oldest ``cmem`` nodes by timestamp until count <= *max_total*."""
+        if max_total <= 0:
+            return
+        tree = mem.trees.get("cmem")
+        if not tree:
+            return
+        rows: List[Tuple[float, str]] = []
+        for branch in tree.branches.values():
+            for node in branch.nodes:
+                rows.append((float(node.timestamp), node.moment_id))
+        n = len(rows)
+        if n <= max_total:
+            return
+        rows.sort(key=lambda x: x[0])
+        for _, mid in rows[: n - max_total]:
+            try:
+                mem.remove_node(mid)
+            except Exception as exc:
+                print(f"[BackgroundAgent] cmem prune remove_node error: {exc}", flush=True)
+
     # -- training ------------------------------------------------------
 
     def _run_web_learn(self):
@@ -1069,7 +1241,7 @@ class BackgroundAgent(BaseAgent):
         for module_name, train_fn in train_pairs:
             if ts.should_train(module_name):
                 try:
-                    with s.neural_train_sync():
+                    with s.neural_train_sync(module_name):
                         loss = train_fn()
                     if loss is not None:
                         ts.record_loss(module_name, loss)

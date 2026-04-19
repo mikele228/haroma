@@ -6,7 +6,6 @@ Run from repo root: python scripts/check_llm_hw_env.py
 
 from __future__ import annotations
 
-import os
 import subprocess
 import sys
 

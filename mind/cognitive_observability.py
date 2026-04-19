@@ -12,10 +12,9 @@ from __future__ import annotations
 
 import os
 import threading
-import time
 import uuid
 from collections import Counter, deque
-from typing import Any, Deque, Dict, List, Optional
+from typing import Any, Deque, Dict, Optional
 
 
 def new_trace_id() -> str:

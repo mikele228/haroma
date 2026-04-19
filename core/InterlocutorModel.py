@@ -7,10 +7,9 @@ inferred beliefs, goals, emotional state, topics of interest,
 and communication style per speaker.
 """
 
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, field
 from collections import Counter
-import time
 
 
 @dataclass

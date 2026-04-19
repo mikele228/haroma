@@ -11,10 +11,8 @@ Gracefully degrades to no-op when PyTorch is unavailable.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Dict, Any, List, Optional, Tuple
-import math
-import time
+from dataclasses import dataclass
+from typing import Dict, Any, List, Optional
 
 try:
     import torch

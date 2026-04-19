@@ -8,7 +8,7 @@ inspection.  This forces genuine integration -- subsystems must
 produce salient output to influence downstream processing.
 """
 
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List
 from dataclasses import dataclass, field
 import time
 import threading

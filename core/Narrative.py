@@ -49,7 +49,6 @@ class NarrativeForecaster:
         return [self.forecast_next(mid) for mid in moments]
 
 
-from utils.module_base import ModuleBase
 from typing import List, Dict, Any
 
 
@@ -133,7 +132,7 @@ class EmotionNarrativeBinder(ModuleBase):
 
 
 from utils.module_base import ModuleBase
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, List
 
 
 # === Tier 82 Core Module: NarrativeIntersectionMapper (MAX UPGRADE) ===

@@ -39,8 +39,7 @@ _PRETRAINED_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 _PRETRAINED_DIM = 384
 
 try:
-    from transformers import AutoTokenizer, AutoModel
-
+    __import__("transformers")
     _HF_AVAILABLE = True
 except (ImportError, OSError):
     _HF_AVAILABLE = False
@@ -485,8 +484,8 @@ class NeuralEncoder:
         proj_state = data.get("projection_state")
         if proj_state and saved_pretrained and not self._pretrained:
             print(
-                f"[NeuralEncoder] snapshot was pretrained but current instance is not; "
-                f"projection weights will be skipped",
+                "[NeuralEncoder] snapshot was pretrained but current instance is not; "
+                "projection weights will be skipped",
                 flush=True,
             )
         if proj_state and self._pretrained and self._projection is not None:

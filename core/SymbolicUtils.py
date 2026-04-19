@@ -22,7 +22,7 @@ class AffectModulator(ModuleBase):
 
 
 from utils.module_base import ModuleBase
-from typing import List, Dict, Any
+from typing import List, Dict
 from core.AffectiveReasoning import EmotionIdentityTracer, MythicEmotionBinder
 
 
@@ -466,7 +466,6 @@ class SymbolAligner:
 
 from typing import Dict, List, Optional, Any
 import hashlib
-import time
 import json
 from collections import Counter
 
@@ -512,8 +511,6 @@ class MythBinder:
     def summarize(self) -> Dict[str, Any]:
         myths = [b.get("myth") for b in self.bindings]
         anchors = [b.get("anchor") for b in self.bindings]
-        myth_counts = dict(Counter(myths))
-        anchor_counts = dict(Counter(anchors))
         return {
             "total_bindings": len(self.bindings),
             "unique_myths": len(set(myths)),
@@ -544,7 +541,7 @@ class MythBinder:
         return f"<MythBinder bindings={len(self.bindings)}>"
 
 
-from typing import Optional, Tuple, Dict, Any
+from typing import Optional, Dict, Any
 from utils.module_base import ModuleBase
 import copy
 
@@ -561,8 +558,6 @@ class ReflectiveMixin(ModuleBase):
 
     def execute(self, payload: Dict[str, Any], memory_engine) -> Dict[str, Any]:
         prior_thought = payload.get("thought", {})
-        context = payload.get("context", {})
-        cycle_ts = context.get("cycle_ts", "unknown")
         class_name = self.__class__.__name__
 
         result = self.reflect(copy.deepcopy(prior_thought), memory_engine)

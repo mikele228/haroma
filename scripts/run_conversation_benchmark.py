@@ -98,7 +98,7 @@ def main() -> None:
 
     import mind.elarion_server_v2 as srv
 
-    print(f"[conv-bench] Booting stack (this can take a minute)...", flush=True)
+    print("[conv-bench] Booting stack (this can take a minute)...", flush=True)
     t_boot = time.perf_counter()
     srv._init()
     print(f"[conv-bench] Boot done in {time.perf_counter() - t_boot:.1f}s", flush=True)

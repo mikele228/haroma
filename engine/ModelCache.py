@@ -6,7 +6,7 @@ Thread-safe: uses a module-level lock.
 
 import threading
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 _lock = threading.Lock()
 _cache: Dict[str, Any] = {}

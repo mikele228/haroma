@@ -15,7 +15,7 @@ from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 if TYPE_CHECKING:
-    from agents.message_bus import MessageBus, Message
+    from agents.message_bus import MessageBus
     from agents.shared_resources import SharedResources
 
 

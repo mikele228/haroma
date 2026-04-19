@@ -1,4 +1,5 @@
-import os, json
+import os
+import json
 
 d = "c:/Project/HaromaX6/data/cognitive/memory_trees"
 total_nodes = 0

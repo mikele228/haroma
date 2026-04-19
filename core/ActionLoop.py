@@ -7,7 +7,7 @@ of that response.  Over time it learns which strategies work in which
 contexts.
 """
 
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set
 from collections import defaultdict
 import hashlib
 import os

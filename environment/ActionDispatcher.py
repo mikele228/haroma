@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import time
 import requests
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, Optional
 
 
 PHYSICAL_ACTION_TYPES = frozenset(

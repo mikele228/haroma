@@ -11,11 +11,6 @@ skip_unless_torch_imports()
 
 import pytest
 
-try:
-    import torch
-except (ImportError, OSError):
-    pytest.skip("torch unavailable", allow_module_level=True)
-
 from engine.CognitiveBackbone import CognitiveBackbone, build_snapshot, _SNAPSHOT_DIM, _Z_DIM
 
 pytestmark = pytest.mark.torch

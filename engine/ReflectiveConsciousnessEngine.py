@@ -1,4 +1,4 @@
-from typing import Dict, Any, List
+from typing import Dict, Any
 from utils.module_base import ModuleBase
 from engine.EmotionEngine import EmotionEngine
 from engine.IdentityEngine import IdentityEngine

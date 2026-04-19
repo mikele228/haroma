@@ -22,16 +22,26 @@ Console iteration (one line per completed cycle):
 Set ``HAROMA_COGNITIVE_LOOP_BEGIN=1`` for a matching ``begin`` line at cycle start.
 Set ``HAROMA_LOOP_MEMORY_CONSOLE=1`` to mirror ``loop.log_loop`` writes to the console.
 
-``HAROMA_LLM_DUMMY_REPLY=1`` skips real ``generate_chat`` inside ``LLMContextReasoner``
-only (synthetic / probe reply). **All earlier stages still run** (InputAgent, TrueSelf
-routing, shared neural read lock + persona gate (skipped for TrueSelf+HTTP trace), encoder, recall,
-packed-context hook, etc.) — that is what you want for **end-to-end pipeline latency**
-without paying native LLM decode.
+**Production /chat latency** (no dummy): HTTP-traced turns use FAISS ``recall_fast``
+when ``HAROMA_TRUESELF_USER_CHAT_FAST_RECALL`` is on, one-shot unphased cycles for
+TrueSelf + ``trueself_delegate`` when ``HAROMA_TRUESELF_HTTP_CHAT_UNPHASED`` is on,
+optional pre-LLM budgets (``HAROMA_TRUESELF_USER_CHAT_BUDGET_SEC``, etc.), and
+additional **TrueSelf HTTP lite skips** (workspace broadcast, goal prioritize, post-LLM
+extras, neural outcome recording, … — see ``HAROMA_TRUESELF_USER_CHAT_SKIP_*`` in
+``.env.example``). Set any ``SKIP_*`` to ``0`` to re-enable that slice for richer
+cognition at a higher latency cost.
 
-**Shared neural read lock (1s cooperative budget)** — see :mod:`mind.lock_budget`.
-Inference uses two short ``neural_sync`` / ``persona_neural_section`` slices (embed +
-perception, then gate / backbone / self-model / discourse), then recall through
-reasoning **without** holding the neural RW lock. After packed LLM, counterfactual
+``HAROMA_LLM_DUMMY_REPLY`` is a **development probe only**: it skips native
+``generate_chat`` inside ``LLMContextReasoner`` so you can measure pre-decode work.
+It is not a supported runtime mode and may be removed; do not treat dummy-specific
+pack shortcuts as the product latency strategy.
+
+**Shared neural read locks (1s cooperative budget)** — see :mod:`mind.lock_budget`
+and ``HAROMA_NEURAL_LOCK_MODE`` (:mod:`core.neural_branches`). Default **per-branch**
+locks only the modules each slice touches so training can write another module while
+inference reads. Inference uses two short ``neural_sync`` / ``persona_neural_section``
+slices (embed + perception, then gate / backbone / self-model / discourse), then
+recall through reasoning **without** holding those read locks. After packed LLM, counterfactual
 through action/outcome/memory **run off lock**; only self-model compare, trainable
 ``record_outcome`` updates, and composer context/recording use short locks.
 Heavy follow-up can schedule work onto the persona thread via
@@ -41,10 +51,11 @@ Heavy follow-up can schedule work onto the persona thread via
 :meth:`_process_message` runs the pipeline as a generator with yields between
 major groups; each call advances up to ``HAROMA_PERSONA_PHASE_STEPS_PER_TICK``
 phase boundaries, and :meth:`_advance_cognitive_phases_on_tick` continues pending
-generators on later ticks — **except** HTTP-traced TrueSelf conversant turns,
-which default to one full run (``HAROMA_TRUESELF_HTTP_CHAT_UNPHASED``, default on)
-so ``/chat`` is not stretched across many ticks. When phased mode is off, the full
-cycle still runs in one call. The cooperative lock
+generators on later ticks — **except** HTTP-traced conversant turns (TrueSelf
+direct ``/chat`` and specialists handling ``trueself_delegate`` with the same
+trace), which default to one full run (``HAROMA_TRUESELF_HTTP_CHAT_UNPHASED``,
+default on) so async ``/chat`` is not stretched across many persona ticks. When
+phased mode is off, the full cycle still runs in one call. The cooperative lock
 budget is still met by **short neural slices**, **off-lock** recall/reasoning,
 and optional **background** training round-robin (``HAROMA_BG_MAX_TRAIN_MODULES_PER_TICK``).
 
@@ -67,7 +78,7 @@ import random
 import re
 import threading
 import time
-from typing import Any, Callable, Dict, Iterator, List, Optional, Set, TYPE_CHECKING
+from typing import Any, Callable, Dict, Iterator, List, Optional, Set, TYPE_CHECKING, Tuple
 
 import numpy as np
 
@@ -84,7 +95,6 @@ from mind.cognitive_contracts import (
     build_agent_state_json_for_packed_llm,
     build_llm_centric_action,
     build_packed_llm_cycle_inputs,
-    chat_llm_primary_env_enabled,
     complete_deferred_deliberative_llm_context,
     discourse_context_for_packed_llm,
     invoke_run_llm_context_reasoning_phase,
@@ -111,7 +121,6 @@ from mind.chat_priority import (
     input_pipeline_yield_busy,
 )
 from mind.persona_http_yield import (
-    defer_inner_cycle_before_neural,
     http_chat_inflight_positive,
     inner_relay_should_requeue,
     internal_treat_as_over_budget,
@@ -121,6 +130,13 @@ from core.cognitive_null import is_cognitive_null
 from core.self_model_train_batch import SelfModelTrainBatch
 from core.derivation_merge import merge_derivation_artifacts
 from mind.environment_context import propose_structured_actions
+from mind.haroma_settings import (
+    haroma_cmem_merge_prime,
+    haroma_cmem_recall_fallback_forest,
+    haroma_cmem_recall_max_probe,
+    haroma_memory_recall_intensity,
+    haroma_recall_cmem_only,
+)
 from mind.humanoid_brain_state import compute_brain_like_state, maybe_log_brain_state
 from mind.outcome_belief_update import (
     apply_outcome_grounded_belief_updates,
@@ -164,6 +180,30 @@ from core.chat_recall_policy import (
     web_learn_inject_max,
 )
 from engine.CognitiveBackbone import build_snapshot
+
+# Per-module neural RW branches (see core.neural_branches / HAROMA_NEURAL_LOCK_MODE).
+_PERSONA_NEURAL_SLICE1_BRANCHES: Tuple[str, ...] = ("encoder",)
+_PERSONA_NEURAL_SLICE2_BRANCHES_FULL: Tuple[str, ...] = (
+    "backbone",
+    "process_gate",
+    "self_model",
+    "attention",
+    "mental_sim",
+)
+_PERSONA_NEURAL_SLICE2_BRANCHES_LITE: Tuple[str, ...] = ("process_gate",)
+
+
+def _http_traced_recall_fast_limit(recall_limit: int) -> int:
+    """Effective ``limit`` for :meth:`~core.Memory.MemoryForest.recall_fast` on HTTP-traced /chat.
+
+    ``recall_limit`` is already capped by ``HAROMA_TRUESELF_USER_CHAT_RECALL_LIMIT`` (and
+    modulation / intensity). Previously an extra ``min(..., 8)`` hid the configured cap.
+    """
+    try:
+        rl = int(recall_limit)
+    except (TypeError, ValueError):
+        rl = 1
+    return max(1, rl)
 
 
 class PersonaAgent(BaseAgent):
@@ -717,20 +757,23 @@ class PersonaAgent(BaseAgent):
             pass
 
     def _unphased_trueself_http_traced_conversant(self, msg: Message, role: str) -> bool:
-        """TrueSelf + HTTP trace + conversant: run full cycle in one call (no phased ticks).
+        """HTTP-traced conversant: run full cycle in one call (no phased ticks).
 
-        Phased mode schedules work across agent ticks (``_advance_cognitive_phases_on_tick``
-        runs before ``poll()``), which adds multi-second latency to ``/chat`` even
-        when the LLM is dummy. Specialists keep phased scheduling; TrueSelf user
-        replies should complete in one ``_handle_input`` stack.
+        Phased mode schedules one phase boundary per persona tick; delegated
+        specialists (``channel == trueself_delegate``) would otherwise stretch
+        async ``/chat`` by roughly ``phases × persona_tick_interval``. TrueSelf
+        direct ``/chat`` and delegated specialists with the same
+        ``cognitive_trace_id`` both complete in one ``_process_message`` stack.
         """
         if role != "conversant":
             return False
-        if getattr(self, "AGENT_TYPE", None) != "trueself":
-            return False
         if trace_id_from_message(msg) is None:
             return False
-        return env_flag("HAROMA_TRUESELF_HTTP_CHAT_UNPHASED", True)
+        if not env_flag("HAROMA_TRUESELF_HTTP_CHAT_UNPHASED", True):
+            return False
+        _ts = getattr(self, "AGENT_TYPE", None) == "trueself"
+        _delegated = getattr(msg, "channel", None) == "trueself_delegate"
+        return bool(_ts or _delegated)
 
     def _process_message(self, msg: Message, role: str = "observer") -> bool:
         """Run the full cognitive cycle on a message.
@@ -940,6 +983,22 @@ class PersonaAgent(BaseAgent):
             and not is_internal
             and _user_or_traced_turn
         )
+        # HTTP /chat (InputAgent sets ``cognitive_trace_id`` on the wait slot): use FAISS-only
+        # recall for *any* persona. Delegated specialists (e.g. primary) used to take the
+        # hybrid ``recall()`` path and could block 10s+ on large forests while TrueSelf did not.
+        _http_traced_chat_fast_recall = (
+            bool(_pipe_tid)
+            and role == "conversant"
+            and not is_internal
+            and _user_or_traced_turn
+        )
+        # Optional lite path for TrueSelf HTTP /chat (see .env.example "TrueSelf user chat").
+        _ts_skip_post_llm_extras = _ts_http_fast and env_flag(
+            "HAROMA_TRUESELF_USER_CHAT_SKIP_POST_LLM_EXTRAS", True
+        )
+        _ts_skip_neural_outcome_record = _ts_http_fast and env_flag(
+            "HAROMA_TRUESELF_USER_CHAT_SKIP_POST_LLM_NEURAL_RECORD", True
+        )
         if is_internal:
             try:
                 if int(getattr(self.shared, "http_chat_inflight", 0) or 0) > 0:
@@ -960,8 +1019,14 @@ class PersonaAgent(BaseAgent):
                 f"trueself_skip_persona_gate={_trueself_traced_fast}"
             ),
         )
+        # Long holds here (through recall / reasoning / packed LLM prep) block other
+        # neural_sync users and training. Mitigate with HAROMA_TRUESELF_USER_CHAT_*,
+        # HAROMA_MEMORY_RECALL_INTENSITY, HAROMA_CHAT_INPUT_PRIORITY — narrowing this
+        # scope further would be a larger invariant review (see chat latency plan).
         _sync_ctx = (
-            s.neural_sync() if _trueself_traced_fast else s.persona_neural_section()
+            s.neural_sync(*_PERSONA_NEURAL_SLICE1_BRANCHES)
+            if _trueself_traced_fast
+            else s.persona_neural_section(*_PERSONA_NEURAL_SLICE1_BRANCHES)
         )
         with _sync_ctx:
             log_input_pipeline("persona.inside_neural_sync", trace_id=_pipe_tid)
@@ -1111,12 +1176,24 @@ class PersonaAgent(BaseAgent):
 
             _st = _step_time("1-perception+embed")
 
-        # TrueSelf HTTP /chat: after slice 1, skip heavy slice-2 work if user-chat budget already exceeded.
-        _ts_skip_neural_b_heavy = _ts_http_fast and _over_budget()
+        # TrueSelf HTTP /chat: skip discourse / interlocutor / self-predict by default (big win on
+        # local CPU). Still skippable when budget is exceeded mid-slice-1.
+        _ts_skip_neural_b_heavy = _ts_http_fast and (
+            _over_budget()
+            or env_flag("HAROMA_TRUESELF_USER_CHAT_SKIP_NEURAL_SLICE2_HEAVY", True)
+        )
+
+        _slice2_branches: Tuple[str, ...] = (
+            _PERSONA_NEURAL_SLICE2_BRANCHES_LITE
+            if _ts_skip_neural_b_heavy
+            else _PERSONA_NEURAL_SLICE2_BRANCHES_FULL
+        )
 
         # Second short neural read (shared lock budget): gate, backbone, self-model, discourse.
         _sync_ctx_b = (
-            s.neural_sync() if _trueself_traced_fast else s.persona_neural_section()
+            s.neural_sync(*_slice2_branches)
+            if _trueself_traced_fast
+            else s.persona_neural_section(*_slice2_branches)
         )
         with _sync_ctx_b:
             # -- 1.45. Process gate ----------------------------------------
@@ -1247,6 +1324,7 @@ class PersonaAgent(BaseAgent):
             yield COGNITIVE_PHASE_NEURAL_GATE
 
         # -- 2. Semantic recall (budget-aware) -------------------------
+        _recall_intensity = haroma_memory_recall_intensity()
         query_tags = symbolic_input.get("tags", [])
         if isinstance(query_tags, list) and isinstance(tags, list):
             seen = set(query_tags)
@@ -1260,43 +1338,67 @@ class PersonaAgent(BaseAgent):
             recall_limit = min(recall_limit, 7 if _teaching else 5)
         elif _teaching:
             recall_limit = min(recall_limit + 10, 28)
-        if (
-            _trueself_agent
-            and role == "conversant"
-            and _user_or_traced_turn
-            and not is_internal
-        ):
+        # HTTP-traced /chat (any persona): cap or skip semantic recall.
+        # ``HAROMA_TRUESELF_USER_CHAT_RECALL_LIMIT=0`` → skip recall entirely (instant path).
+        # Previously ``0`` was treated like "unset" and did not apply a cap, leaving recall_limit high.
+        _http_skip_semantic_recall = False
+        if _http_traced_chat_fast_recall and not is_internal:
             _rl_raw = str(os.environ.get("HAROMA_TRUESELF_USER_CHAT_RECALL_LIMIT", "12") or "").strip()
-            if _rl_raw not in ("0", ""):
+            if _rl_raw == "0":
+                _http_skip_semantic_recall = True
+            elif _rl_raw not in ("",):
                 try:
                     _rl_cap = int(_rl_raw)
                 except (TypeError, ValueError):
                     _rl_cap = 12
                 if _rl_cap > 0:
                     recall_limit = min(recall_limit, _rl_cap)
+        if 0 < _recall_intensity < 10:
+            recall_limit = max(1, (recall_limit * _recall_intensity + 9) // 10)
+        _cmem_only = haroma_recall_cmem_only()
+        _cmem_kw = {}
+        if _cmem_only:
+            _cmem_kw = {
+                "tree_names": frozenset({"cmem"}),
+                "tree_recall_max_probe": haroma_cmem_recall_max_probe(),
+            }
+        _prime_prepend = (not _cmem_only) or haroma_cmem_merge_prime()
         if skip_semantic_recall_for_internal(is_internal, s):
             recalled = []
+        elif _recall_intensity == 0:
+            recalled = []
+        elif _http_skip_semantic_recall:
+            recalled = []
         elif (
-            _ts_http_fast
+            _http_traced_chat_fast_recall
             and not is_internal
             and env_flag("HAROMA_TRUESELF_USER_CHAT_FAST_RECALL", True)
             and hasattr(s.memory, "recall_fast")
         ):
             # Full ``recall()`` hybrid path can take 10s+ on large forests (51k+ nodes);
             # FAISS-only ``recall_fast`` keeps HTTP /chat under the user-chat budget.
-            _rf_lim = max(1, min(recall_limit, 8))
-            recalled = s.memory.recall_fast(query_text or "", limit=_rf_lim)
+            _rf_lim = _http_traced_recall_fast_limit(recall_limit)
+            recalled = s.memory.recall_fast(query_text or "", limit=_rf_lim, **_cmem_kw)
+            if _cmem_only and not recalled and haroma_cmem_recall_fallback_forest():
+                recalled = s.memory.recall_fast(query_text or "", limit=_rf_lim)
             recalled = s.memory.merge_recall_with_prime(
-                recalled, _rf_lim, fast_cycle=True
+                recalled, _rf_lim, fast_cycle=True, prepend_prime=_prime_prepend
             )
         else:
             recalled = s.memory.recall(
                 query_tags=query_tags,
                 limit=recall_limit,
                 query_text=query_text,
+                **_cmem_kw,
             )
+            if _cmem_only and not recalled and haroma_cmem_recall_fallback_forest():
+                recalled = s.memory.recall(
+                    query_tags=query_tags,
+                    limit=recall_limit,
+                    query_text=query_text,
+                )
             recalled = s.memory.merge_recall_with_prime(
-                recalled, recall_limit, fast_cycle=False
+                recalled, recall_limit, fast_cycle=False, prepend_prime=_prime_prepend
             )
             if has_external and should_merge_web_learn(
                 query_text, nlu_result or {}, teaching=_teaching
@@ -1347,6 +1449,11 @@ class PersonaAgent(BaseAgent):
         episode.bind_knowledge(knowledge_summary)
 
         _st = _step_time("2-recall+kg")
+        log_input_pipeline(
+            "persona.post_recall_kg",
+            trace_id=_pipe_tid,
+            detail=f"agent={self.agent_id} n_mem={len(getattr(episode, 'recalled_memories', []) or [])}",
+        )
 
         # -- 3. Feel (persona-specific emotion) ------------------------
         _neuro_scale = 1.0 + ((self.personality.get("neuroticism") or 0.5) - 0.5) * 0.4
@@ -1386,66 +1493,73 @@ class PersonaAgent(BaseAgent):
         def _workspace_salience(source: str, base: float) -> float:
             return s.attention.adjust_salience(source, base, attention_ctx, z_t=_z_t)
 
+        _skip_ws_broadcast = _ts_http_fast and env_flag(
+            "HAROMA_TRUESELF_USER_CHAT_SKIP_WORKSPACE_BROADCAST", True
+        )
         if not _over_budget():
-            n_mod = len(symbolic_input.get("modalities", ["text"]))
-            base_p_sal = (
-                0.5 + (0.3 if symbolic_input.get("tags") else 0.0) + (0.1 * min(n_mod - 1, 3))
-            )
-            self.workspace.broadcast(
-                "perception",
-                symbolic_input,
-                salience=_workspace_salience("perception", base_p_sal),
-            )
-            self.workspace.broadcast(
-                "memory",
-                {"recalled": episode.recalled_memories},
-                salience=_workspace_salience("memory", episode.memory_influence),
-            )
-            if not input_pipeline_busy(s, getattr(self, "_boot_agent", None)):
-                try:
-                    stim = s.pop_autonomous_stimulus(self.agent_id)
-                    if stim:
-                        self.workspace.broadcast(
-                            "autonomy_stimulus",
-                            stim,
-                            salience=_workspace_salience("autonomy_stimulus", 0.72),
-                        )
-                    auto_last = s.memory.get_nodes("thought_tree", "autonomy")
-                    if auto_last:
-                        self.workspace.broadcast(
-                            "autonomy",
-                            {
-                                "recent": (auto_last[-1].content or "")[:320],
-                                "branch": "autonomy",
-                            },
-                            salience=_workspace_salience("autonomy", 0.52),
-                        )
-                except Exception as _aw:
-                    print(
-                        f"[Persona:{self.agent_id}] autonomy workspace broadcast error: {_aw}",
-                        flush=True,
-                    )
-            self.workspace.broadcast(
-                "emotion",
-                emotion_summary,
-                salience=_workspace_salience("emotion", emotion_summary.get("intensity", 0.0)),
-            )
-            if knowledge_diff.get("changed"):
-                base_kg_sal = min(1.0, knowledge_diff.get("knowledge_gain", 0.0) + 0.3)
-                self.workspace.broadcast(
-                    "knowledge",
-                    {
-                        "new_entities": knowledge_diff.get("new_entities", 0),
-                        "new_relations": knowledge_diff.get("new_relations", 0),
-                    },
-                    salience=_workspace_salience("knowledge", base_kg_sal),
+            if _skip_ws_broadcast:
+                episode.bind_workspace([], self.workspace.get_unconscious())
+                episode.trace("5.workspace")
+            else:
+                n_mod = len(symbolic_input.get("modalities", ["text"]))
+                base_p_sal = (
+                    0.5 + (0.3 if symbolic_input.get("tags") else 0.0) + (0.1 * min(n_mod - 1, 3))
                 )
+                self.workspace.broadcast(
+                    "perception",
+                    symbolic_input,
+                    salience=_workspace_salience("perception", base_p_sal),
+                )
+                self.workspace.broadcast(
+                    "memory",
+                    {"recalled": episode.recalled_memories},
+                    salience=_workspace_salience("memory", episode.memory_influence),
+                )
+                if not input_pipeline_busy(s, getattr(self, "_boot_agent", None)):
+                    try:
+                        stim = s.pop_autonomous_stimulus(self.agent_id)
+                        if stim:
+                            self.workspace.broadcast(
+                                "autonomy_stimulus",
+                                stim,
+                                salience=_workspace_salience("autonomy_stimulus", 0.72),
+                            )
+                        auto_last = s.memory.get_nodes("thought_tree", "autonomy")
+                        if auto_last:
+                            self.workspace.broadcast(
+                                "autonomy",
+                                {
+                                    "recent": (auto_last[-1].content or "")[:320],
+                                    "branch": "autonomy",
+                                },
+                                salience=_workspace_salience("autonomy", 0.52),
+                            )
+                    except Exception as _aw:
+                        print(
+                            f"[Persona:{self.agent_id}] autonomy workspace broadcast error: {_aw}",
+                            flush=True,
+                        )
+                self.workspace.broadcast(
+                    "emotion",
+                    emotion_summary,
+                    salience=_workspace_salience("emotion", emotion_summary.get("intensity", 0.0)),
+                )
+                if knowledge_diff.get("changed"):
+                    base_kg_sal = min(1.0, knowledge_diff.get("knowledge_gain", 0.0) + 0.3)
+                    self.workspace.broadcast(
+                        "knowledge",
+                        {
+                            "new_entities": knowledge_diff.get("new_entities", 0),
+                            "new_relations": knowledge_diff.get("new_relations", 0),
+                        },
+                        salience=_workspace_salience("knowledge", base_kg_sal),
+                    )
 
-            ws_contents = self.workspace.select()
-            episode.bind_workspace(ws_contents, self.workspace.get_unconscious())
-            self.workspace.integrate()
-            self.working_memory.promote_from_workspace(ws_contents, cycle=cycle_id)
-            episode.trace("5.workspace")
+                ws_contents = self.workspace.select()
+                episode.bind_workspace(ws_contents, self.workspace.get_unconscious())
+                self.workspace.integrate()
+                self.working_memory.promote_from_workspace(ws_contents, cycle=cycle_id)
+                episode.trace("5.workspace")
 
         # -- 6. Temporal arc + predictive continuity -------------------
         temporal_arc = ""
@@ -1457,7 +1571,10 @@ class PersonaAgent(BaseAgent):
                 episode.affect.get("dominant_emotion"),
             )
             episode.bind_temporal(temporal_pos)
-        if not _over_budget():
+        _skip_temp_arc = _ts_http_fast and env_flag(
+            "HAROMA_TRUESELF_USER_CHAT_SKIP_TEMPORAL_ARC", True
+        )
+        if not _over_budget() and not _skip_temp_arc:
             temporal_arc = s.temporal.summarize_arc(n=15)
             if temporal_arc and len(s.temporal.episode_timeline) > 3:
                 narrative_ctx = f"{narrative_ctx} {temporal_arc}"
@@ -1495,8 +1612,11 @@ class PersonaAgent(BaseAgent):
         # -- 7. Symbolic law / value bound to episode + workspace --------
         law_tags = build_law_tags(symbolic_input, content_data)
         _budget = _over_budget()
+        _skip_law_side = _ts_http_fast and env_flag(
+            "HAROMA_TRUESELF_USER_CHAT_SKIP_LAW_SIDECAR", True
+        )
         run_law_value_myth_sidecar_phase(
-            gate_enabled=_gate_decisions.get("law_value_myth_fusion", True),
+            gate_enabled=_gate_decisions.get("law_value_myth_fusion", True) and not _skip_law_side,
             law=getattr(s, "law", None),
             law_tags=law_tags,
             episode=episode,
@@ -1528,7 +1648,10 @@ class PersonaAgent(BaseAgent):
         _st = _step_time("3-9-feel+workspace+temporal+law+identity")
 
         # -- 10. Goals -------------------------------------------------
-        if episode.affect["intensity"] > 0.5:
+        _skip_goal_pri = _ts_http_fast and env_flag(
+            "HAROMA_TRUESELF_USER_CHAT_SKIP_GOAL_PRIORITIZE", True
+        )
+        if not _skip_goal_pri and episode.affect["intensity"] > 0.5:
             s.goal.register_goal(
                 f"emotional_{cycle_id}",
                 f"Process {episode.affect['dominant_emotion']} "
@@ -1536,11 +1659,14 @@ class PersonaAgent(BaseAgent):
                 priority=episode.affect["intensity"],
                 source="emotion",
             )
-        priorities = (
-            s.goal.prioritize_workfront()
-            if hasattr(s.goal, "prioritize_workfront")
-            else s.goal.prioritize()
-        )
+        if _skip_goal_pri:
+            priorities = []
+        else:
+            priorities = (
+                s.goal.prioritize_workfront()
+                if hasattr(s.goal, "prioritize_workfront")
+                else s.goal.prioritize()
+            )
         _goal_store = s.goal.engine.goals
         active_goals: List[Dict[str, Any]] = []
         _gb_goals = getattr(s, "goal_board", None)
@@ -1572,6 +1698,11 @@ class PersonaAgent(BaseAgent):
                 _row["action_items"] = ginfo["action_items"]
             active_goals.append(_row)
         episode.bind_goals(active_goals, urgency=min(1.0, len(priorities) / 10.0))
+        log_input_pipeline(
+            "persona.post_goals",
+            trace_id=_pipe_tid,
+            detail=f"agent={self.agent_id} n_goals={len(active_goals)}",
+        )
 
         # -- 10.5. Drives ---------------------------------------------
         drive_state = s.drives.update(
@@ -1585,19 +1716,30 @@ class PersonaAgent(BaseAgent):
         # -- 10.7. Appraisal ------------------------------------------
         prev_drift = self._prev_episode_payload.get("drift_score", 0.0)
         personality_summary = self.personality.summarize()
-        appraisal_result = s.appraisal.evaluate(
-            nlu_result=nlu_result,
-            active_goals=active_goals,
-            knowledge_summary=knowledge_summary,
-            knowledge_diff=knowledge_diff,
-            identity_summary=identity_summary,
-            emotion_summary=emotion_summary,
-            drift_score=prev_drift,
-            action_memory_stats=s.action_memory.stats(),
-            working_memory_load=self.working_memory.occupancy(),
-            interlocutor=interlocutor_snapshot,
-            personality=personality_summary,
+        _skip_appraisal = _ts_http_fast and env_flag(
+            "HAROMA_TRUESELF_USER_CHAT_SKIP_APPRAISAL", True
         )
+        if _skip_appraisal:
+            appraisal_result = {
+                "overrides": False,
+                "emotion": None,
+                "intensity": None,
+                "_raw_features": [],
+            }
+        else:
+            appraisal_result = s.appraisal.evaluate(
+                nlu_result=nlu_result,
+                active_goals=active_goals,
+                knowledge_summary=knowledge_summary,
+                knowledge_diff=knowledge_diff,
+                identity_summary=identity_summary,
+                emotion_summary=emotion_summary,
+                drift_score=prev_drift,
+                action_memory_stats=s.action_memory.stats(),
+                working_memory_load=self.working_memory.occupancy(),
+                interlocutor=interlocutor_snapshot,
+                personality=personality_summary,
+            )
         episode.bind_appraisal(appraisal_result)
 
         if appraisal_result.get("overrides"):
@@ -1666,6 +1808,11 @@ class PersonaAgent(BaseAgent):
             )
 
         _st = _step_time("10-12-goals+drives+appraisal+modulation+reflect")
+        log_input_pipeline(
+            "persona.post_reflect_block",
+            trace_id=_pipe_tid,
+            detail=f"agent={self.agent_id} drift={float(drift_score):.3f}",
+        )
 
         # -- 13. Curiosity (skippable when over budget) -----------------
         _prev_strategy = (
@@ -1673,8 +1820,15 @@ class PersonaAgent(BaseAgent):
             if isinstance(self._prev_episode_payload.get("action"), dict)
             else "reflect"
         )
+        _skip_curiosity = _ts_http_fast and env_flag(
+            "HAROMA_TRUESELF_USER_CHAT_SKIP_CURIOSITY", True
+        )
         curiosity_result = run_curiosity_phase(
-            enabled=(_gate_decisions.get("curiosity", True) and not _over_budget()),
+            enabled=(
+                _gate_decisions.get("curiosity", True)
+                and not _over_budget()
+                and not _skip_curiosity
+            ),
             episode=episode,
             curiosity=s.curiosity,
             emotion_summary=emotion_summary,
@@ -1711,6 +1865,11 @@ class PersonaAgent(BaseAgent):
             gate_law_value_myth=_gate_decisions.get("law_value_myth_fusion", True),
             gate_reasoning_for_refresh=True,
             trace_label="13.2.reasoning_law",
+        )
+        log_input_pipeline(
+            "persona.post_reasoning",
+            trace_id=_pipe_tid,
+            detail=f"agent={self.agent_id}",
         )
 
         # -- 13.2b. LLM context (outside neural_sync: generate_chat can run
@@ -1771,12 +1930,34 @@ class PersonaAgent(BaseAgent):
             episode=episode,
         )
 
+        _disc_dn: Optional[str] = None
+        if _session_uid:
+            try:
+                _disc_dn = s.get_user_display_name(_session_uid)
+            except Exception:
+                _disc_dn = None
+        if not (_disc_dn or "").strip() and _display_name_in:
+            _disc_dn = str(_display_name_in).strip()[:160] or None
+
+        _trace_for_discourse = str(_pipe_tid).strip() if _pipe_tid else None
+        _essence_for_discourse = ""
+        if isinstance(identity_summary, dict):
+            _essence_for_discourse = str(identity_summary.get("essence_name") or "").strip()[:120]
         _discourse_llm = discourse_context_for_packed_llm(
             self.conversation,
             cycle_id=cycle_id,
             speaker_key=_speaker_key,
             session_uid=bool(_session_uid),
             first_encounter_asks_name=_first_encounter_asks_name,
+            user_id=_session_uid,
+            display_name=_disc_dn,
+            user_text=text or "",
+            trace_id=_trace_for_discourse,
+            persona_name=str(getattr(self, "persona_name", "") or ""),
+            essence_name=_essence_for_discourse,
+            deliberative_flag=bool(deliberative_flag),
+            llm_ctx_enabled=bool(_llm_ctx_enabled),
+            role=str(role or ""),
         )
 
         if cognitive_phases_enabled():
@@ -1838,7 +2019,11 @@ class PersonaAgent(BaseAgent):
             "branches": [],
         }
         _cf_features: List[float] = []
-        if _gate_decisions.get("counterfactual", True) and not _over_budget():
+        if (
+            _gate_decisions.get("counterfactual", True)
+            and not _over_budget()
+            and not _ts_skip_post_llm_extras
+        ):
             _cf_features = build_counterfactual_gate_features(
                 knowledge_diff=knowledge_diff,
                 reasoning_result=reasoning_result,
@@ -1870,7 +2055,11 @@ class PersonaAgent(BaseAgent):
         # -- 13.5. Metacognition (skippable) ---------------------------
         episode.bind_reconciliation(self._last_reconcile_bus_payload)
         meta_assessment, _ = run_metacognition_phase(
-            enabled=(_gate_decisions.get("metacognition", True) and not _over_budget()),
+            enabled=(
+                _gate_decisions.get("metacognition", True)
+                and not _over_budget()
+                and not _ts_skip_post_llm_extras
+            ),
             extended=False,
             metacognition=s.metacognition,
             episode=episode,
@@ -1881,7 +2070,11 @@ class PersonaAgent(BaseAgent):
 
         # -- 13.7. Imagination (skippable) -----------------------------
         imagination_result, imagined_strategy, imagined_plan = run_imagination_phase(
-            enabled=(_gate_decisions.get("imagination", True) and not _over_budget()),
+            enabled=(
+                _gate_decisions.get("imagination", True)
+                and not _over_budget()
+                and not _ts_skip_post_llm_extras
+            ),
             imagination=s.imagination,
             episode=episode,
             current_embedding=current_embedding,
@@ -2096,7 +2289,14 @@ class PersonaAgent(BaseAgent):
 
         # -- 16b. Post-turn forest touch + cited-node bump -------------
         _touch_policy = os.environ.get("HAROMA_MEMORY_TOUCH_POLICY", "recalled_plus_core")
-        if _touch_policy != "off" and hasattr(s.memory, "touch_trees_after_turn"):
+        _skip_mem_touch = _ts_http_fast and env_flag(
+            "HAROMA_TRUESELF_USER_CHAT_SKIP_MEMORY_TOUCH", True
+        )
+        if (
+            not _skip_mem_touch
+            and _touch_policy != "off"
+            and hasattr(s.memory, "touch_trees_after_turn")
+        ):
             _recalled_tree_names: Set[str] = set()
             for _rn in episode.recalled_memories:
                 _tn = _rn.get("tree") if isinstance(_rn, dict) else getattr(_rn, "tree", None)
@@ -2202,8 +2402,15 @@ class PersonaAgent(BaseAgent):
             "attention_winner": _attn_win,
         }
         self_surprise: Dict[str, Any] = {}
-        if self_prediction:
-            _sync_sm = s.neural_sync() if _trueself_traced_fast else s.persona_neural_section()
+        _skip_self_cmp = _ts_http_fast and env_flag(
+            "HAROMA_TRUESELF_USER_CHAT_SKIP_SELF_MODEL_COMPARE", True
+        )
+        if self_prediction and not _skip_self_cmp:
+            _sync_sm = (
+                s.neural_sync("self_model")
+                if _trueself_traced_fast
+                else s.persona_neural_section("self_model")
+            )
             with _sync_sm:
                 self_surprise = s.self_model.compare(self_prediction, actual_self_state)
                 episode.bind_self_surprise(self_surprise)
@@ -2225,36 +2432,40 @@ class PersonaAgent(BaseAgent):
         self._prev_self_surprise = self_surprise
 
         # -- Integrative brain-like state + outcome-grounded beliefs (post-surprise)
-        try:
-            _pe = float(curiosity_result.get("prediction_error", 0.0) or 0.0)
-            _bs = compute_brain_like_state(
-                affect=episode.affect,
-                curiosity=dict(episode.curiosity) if hasattr(episode, "curiosity") else {},
-                drives=episode.drives if isinstance(episode.drives, dict) else {},
-                dominant_drive=str(episode.dominant_drive or ""),
-                embodied_modulation=modulation if isinstance(modulation, dict) else {},
-                self_surprise=self_surprise if isinstance(self_surprise, dict) else {},
-                appraisal=appraisal_result if isinstance(appraisal_result, dict) else {},
-                drift_score=float(episode.drift_score or 0.0),
-                prediction_error=_pe,
-            )
-            episode.bind_brain_like_state(_bs)
-            maybe_log_brain_state(self.agent_id, _bs)
-            apply_outcome_grounded_belief_updates(
-                memory=s.memory,
-                outcome=outcome,
-                reasoning_result=reasoning_result,
-                llm_context=llm_context_result if isinstance(llm_context_result, dict) else {},
-                cycle_id=cycle_id,
-                branch_name=branch_name,
-                agent_id=self.agent_id,
-                plasticity_index=float(_bs.get("plasticity_index", 0.5) or 0.5),
-            )
-        except Exception as _brain_err:
-            print(
-                f"[Persona:{self.agent_id}] brain_state / outcome_belief error: {_brain_err}",
-                flush=True,
-            )
+        _skip_brain_belief = _ts_http_fast and env_flag(
+            "HAROMA_TRUESELF_USER_CHAT_SKIP_BRAIN_BELIEF_UPDATE", True
+        )
+        if not _skip_brain_belief:
+            try:
+                _pe = float(curiosity_result.get("prediction_error", 0.0) or 0.0)
+                _bs = compute_brain_like_state(
+                    affect=episode.affect,
+                    curiosity=dict(episode.curiosity) if hasattr(episode, "curiosity") else {},
+                    drives=episode.drives if isinstance(episode.drives, dict) else {},
+                    dominant_drive=str(episode.dominant_drive or ""),
+                    embodied_modulation=modulation if isinstance(modulation, dict) else {},
+                    self_surprise=self_surprise if isinstance(self_surprise, dict) else {},
+                    appraisal=appraisal_result if isinstance(appraisal_result, dict) else {},
+                    drift_score=float(episode.drift_score or 0.0),
+                    prediction_error=_pe,
+                )
+                episode.bind_brain_like_state(_bs)
+                maybe_log_brain_state(self.agent_id, _bs)
+                apply_outcome_grounded_belief_updates(
+                    memory=s.memory,
+                    outcome=outcome,
+                    reasoning_result=reasoning_result,
+                    llm_context=llm_context_result if isinstance(llm_context_result, dict) else {},
+                    cycle_id=cycle_id,
+                    branch_name=branch_name,
+                    agent_id=self.agent_id,
+                    plasticity_index=float(_bs.get("plasticity_index", 0.5) or 0.5),
+                )
+            except Exception as _brain_err:
+                print(
+                    f"[Persona:{self.agent_id}] brain_state / outcome_belief error: {_brain_err}",
+                    flush=True,
+                )
 
         # -- Update narrative buffer -------------------------------------
         _narr_emotion = episode.affect.get("dominant_emotion", "neutral")
@@ -2279,104 +2490,111 @@ class PersonaAgent(BaseAgent):
         # Several brief neural reads (split so no single hold stacks every module).
         _outcome_score_fb = float(outcome.get("score", 0.0))
 
-        def _record_plock():
-            return s.neural_sync() if _trueself_traced_fast else s.persona_neural_section()
-
-        with _record_plock():
-            s.appraisal.record_outcome(
-                appraisal_result.get("_raw_features") or [],
-                actual_emotion=episode.affect["dominant_emotion"],
-                actual_valence=emotion_summary.get("valence", 0.0),
-                actual_arousal=emotion_summary.get("arousal", 0.0),
-                outcome_score=outcome.get("score", 0.0),
-            )
-            s.modulation.record_outcome(
-                valence=emotion_summary.get("valence", 0.0),
-                arousal=emotion_summary.get("arousal", 0.0),
-                modulation_used=modulation,
-                outcome_score=outcome.get("score", 0.0),
-                z_t=_z_t,
+        def _record_plock(*br: str):
+            return (
+                s.neural_sync(*br)
+                if _trueself_traced_fast
+                else s.persona_neural_section(*br)
             )
 
-        with _record_plock():
-            if _is_real_module(getattr(s, "process_gate", None)):
-                try:
-                    s.process_gate.record_outcome(
-                        _gate_decisions,
-                        _gate_features,
-                        _outcome_score_fb,
-                        z_t=_z_t,
-                    )
-                except Exception:
-                    pass
+        if not _ts_skip_neural_outcome_record:
+            with _record_plock("appraisal", "modulation"):
+                s.appraisal.record_outcome(
+                    appraisal_result.get("_raw_features") or [],
+                    actual_emotion=episode.affect["dominant_emotion"],
+                    actual_valence=emotion_summary.get("valence", 0.0),
+                    actual_arousal=emotion_summary.get("arousal", 0.0),
+                    outcome_score=outcome.get("score", 0.0),
+                )
+                s.modulation.record_outcome(
+                    valence=emotion_summary.get("valence", 0.0),
+                    arousal=emotion_summary.get("arousal", 0.0),
+                    modulation_used=modulation,
+                    outcome_score=outcome.get("score", 0.0),
+                    z_t=_z_t,
+                )
 
-            if _is_real_module(getattr(s, "attention", None)):
-                try:
-                    _src_sal: Dict[str, float] = {}
-                    for c in self.workspace.get_contents():
-                        _src = c.source if hasattr(c, "source") else c.get("source", "?")
-                        _sal = c.salience if hasattr(c, "salience") else c.get("salience", 0.5)
-                        _src_sal[_src] = float(_sal)
-                    _ws_winners = [
-                        c.source if hasattr(c, "source") else c.get("source", "?")
-                        for c in self.workspace.get_contents()
-                    ]
-                    s.attention.record_outcome(
-                        _src_sal,
-                        attention_ctx,
-                        _outcome_score_fb,
-                        _ws_winners,
-                        z_t=_z_t,
-                    )
-                except Exception:
-                    pass
-
-        with _record_plock():
-            _bb_mod = getattr(s, "backbone", None)
-            if _is_real_module(_bb_mod) and _bb_snapshot is not None:
-                try:
-                    _obb = getattr(_bb_mod, "_outcome_buffer", None) or []
-                    if self._prev_backbone_snapshot is not None and _obb:
-                        _obb[-1]["next_snapshot"] = _bb_snapshot
-                    _ce_out = None
-                    if current_embedding is not None:
-                        _ce_out = (
-                            np.asarray(
-                                current_embedding,
-                                dtype=np.float32,
-                            )
-                            .flatten()
-                            .tolist()
+            with _record_plock("process_gate", "attention"):
+                if _is_real_module(getattr(s, "process_gate", None)):
+                    try:
+                        s.process_gate.record_outcome(
+                            _gate_decisions,
+                            _gate_features,
+                            _outcome_score_fb,
+                            z_t=_z_t,
                         )
-                    _bb_mod.record_outcome(
-                        _bb_snapshot,
-                        _outcome_score_fb,
-                        next_snapshot=None,
-                        content_embedding=_ce_out,
-                    )
-                    self._prev_backbone_snapshot = _bb_snapshot
-                except Exception:
-                    pass
+                    except Exception:
+                        pass
 
-        with _record_plock():
-            if _is_real_module(getattr(s, "counterfactual", None)) and _cf_features:
-                try:
-                    _cf_val = outcome.get("breakdown", {}).get("counterfactual_value")
-                    if _cf_val is None:
-                        _cf_val = float(counterfactual_result.get("counterfactual_depth", 0)) * 0.3
-                    s.counterfactual.record_outcome(_cf_features, float(_cf_val))
-                except Exception:
-                    pass
+                if _is_real_module(getattr(s, "attention", None)):
+                    try:
+                        _src_sal: Dict[str, float] = {}
+                        for c in self.workspace.get_contents():
+                            _src = c.source if hasattr(c, "source") else c.get("source", "?")
+                            _sal = c.salience if hasattr(c, "salience") else c.get("salience", 0.5)
+                            _src_sal[_src] = float(_sal)
+                        _ws_winners = [
+                            c.source if hasattr(c, "source") else c.get("source", "?")
+                            for c in self.workspace.get_contents()
+                        ]
+                        s.attention.record_outcome(
+                            _src_sal,
+                            attention_ctx,
+                            _outcome_score_fb,
+                            _ws_winners,
+                            z_t=_z_t,
+                        )
+                    except Exception:
+                        pass
 
-            if _is_real_module(getattr(s, "metacognition", None)):
-                try:
-                    s.metacognition.learn_from_outcome(_outcome_score_fb)
-                except Exception:
-                    pass
+            with _record_plock("backbone"):
+                _bb_mod = getattr(s, "backbone", None)
+                if _is_real_module(_bb_mod) and _bb_snapshot is not None:
+                    try:
+                        _obb = getattr(_bb_mod, "_outcome_buffer", None) or []
+                        if self._prev_backbone_snapshot is not None and _obb:
+                            _obb[-1]["next_snapshot"] = _bb_snapshot
+                        _ce_out = None
+                        if current_embedding is not None:
+                            _ce_out = (
+                                np.asarray(
+                                    current_embedding,
+                                    dtype=np.float32,
+                                )
+                                .flatten()
+                                .tolist()
+                            )
+                        _bb_mod.record_outcome(
+                            _bb_snapshot,
+                            _outcome_score_fb,
+                            next_snapshot=None,
+                            content_embedding=_ce_out,
+                        )
+                        self._prev_backbone_snapshot = _bb_snapshot
+                    except Exception:
+                        pass
+
+            with _record_plock("counterfactual", "metacog"):
+                if _is_real_module(getattr(s, "counterfactual", None)) and _cf_features:
+                    try:
+                        _cf_val = outcome.get("breakdown", {}).get("counterfactual_value")
+                        if _cf_val is None:
+                            _cf_val = float(counterfactual_result.get("counterfactual_depth", 0)) * 0.3
+                        s.counterfactual.record_outcome(_cf_features, float(_cf_val))
+                    except Exception:
+                        pass
+
+                if _is_real_module(getattr(s, "metacognition", None)):
+                    try:
+                        s.metacognition.learn_from_outcome(_outcome_score_fb)
+                    except Exception:
+                        pass
 
         # -- Record LLM context reasoning outcome for reward model ------
-        if llm_context_result.get("source") == "llm_context_reasoning" and _is_real_module(
-            getattr(s, "llm_backend", None)
+        if (
+            not _ts_skip_neural_outcome_record
+            and llm_context_result.get("source") == "llm_context_reasoning"
+            and _is_real_module(getattr(s, "llm_backend", None))
         ):
             _lc_answer = llm_context_result.get("answer") or ""
             _lc_input = text or content or ""
@@ -2450,14 +2668,22 @@ class PersonaAgent(BaseAgent):
 
         # -- 15c. Self-grown language (composer phrase + generative) -----
         _co = getattr(s, "composer", None)
+        _skip_composer = _ts_http_fast and env_flag(
+            "HAROMA_TRUESELF_USER_CHAT_SKIP_COMPOSER_RECORD", True
+        )
         if (
-            role == "conversant"
+            not _skip_composer
+            and role == "conversant"
             and is_conv
             and _is_real_module(_co)
             and getattr(_co, "available", False)
         ):
             composer_ctx = None
-            _sync_co = s.neural_sync() if _trueself_traced_fast else s.persona_neural_section()
+            _sync_co = (
+                s.neural_sync("composer")
+                if _trueself_traced_fast
+                else s.persona_neural_section("composer")
+            )
             with _sync_co:
                 try:
                     composer_ctx = _co._build_context(

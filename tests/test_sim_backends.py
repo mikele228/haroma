@@ -5,7 +5,6 @@ from __future__ import annotations
 import os
 import sys
 
-import pytest
 
 _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO not in sys.path:
@@ -50,7 +49,7 @@ def test_http_json_backend_mock(monkeypatch):
     ):
         r = b.reset(seed=2)
         assert r.get("ok") is True
-        s = b.step({"move": "north"})
+        b.step({"move": "north"})
         assert any("action" in str(c) for c in calls)
 
 

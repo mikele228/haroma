@@ -4,8 +4,7 @@ import os
 import sys
 import threading
 import time
-from collections import deque
-from typing import Any, Dict, List, Optional
+from typing import List
 from unittest.mock import MagicMock, patch
 
 import pytest

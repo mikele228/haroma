@@ -17,6 +17,7 @@ Uses ``depth`` (``normal``), not ``mode``, to match ``elarion_server_v2``.
 from __future__ import annotations
 
 import argparse
+import json
 import statistics
 import sys
 import time

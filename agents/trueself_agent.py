@@ -20,7 +20,6 @@ deterministic routing decision for every message.
 from __future__ import annotations
 
 import copy
-import os
 import random
 import threading
 import time
@@ -47,7 +46,6 @@ from mind.cognitive_loop_groups import cognitive_phases_enabled
 
 if TYPE_CHECKING:
     from agents.shared_resources import SharedResources
-    from agents.boot_agent import BootAgent
 
 
 class TrueSelfAgent(PersonaAgent):

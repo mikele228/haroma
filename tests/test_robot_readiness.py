@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import sys
 
-import pytest
 
 _REPO = __import__("os").path.dirname(__import__("os").path.dirname(__file__))
 if _REPO not in sys.path:

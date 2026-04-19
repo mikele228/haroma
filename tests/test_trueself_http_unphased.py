@@ -11,6 +11,7 @@ if _REPO not in sys.path:
     sys.path.insert(0, _REPO)
 
 from agents.message_bus import Message
+from agents.persona_agent import PersonaAgent
 from agents.trueself_agent import TrueSelfAgent
 
 
@@ -38,3 +39,25 @@ def test_unphased_trueself_http_traced_conversant_gate(monkeypatch: pytest.Monke
 
     monkeypatch.setenv("HAROMA_TRUESELF_HTTP_CHAT_UNPHASED", "0")
     assert ts._unphased_trueself_http_traced_conversant(msg, "conversant") is False
+
+
+def test_unphased_delegated_specialist_http_traced_conversant(monkeypatch: pytest.MonkeyPatch):
+    """Specialists receiving ``trueself_delegate`` use the same unphased gate as TrueSelf."""
+    monkeypatch.setenv("HAROMA_TRUESELF_HTTP_CHAT_UNPHASED", "1")
+    pa = PersonaAgent.__new__(PersonaAgent)
+    msg = Message(
+        sender_id="trueself",
+        channel="trueself_delegate",
+        content={"text": "hello"},
+        message_type="delegation",
+        metadata={"cognitive_trace_id": "trace-deleg"},
+    )
+    assert pa._unphased_trueself_http_traced_conversant(msg, "conversant") is True
+    msg_no_trace = Message(
+        sender_id="trueself",
+        channel="trueself_delegate",
+        content={"text": "hello"},
+        message_type="delegation",
+        metadata={},
+    )
+    assert pa._unphased_trueself_http_traced_conversant(msg_no_trace, "conversant") is False

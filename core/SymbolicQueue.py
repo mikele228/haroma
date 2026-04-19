@@ -14,7 +14,7 @@ import hashlib
 import json
 import threading
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 from core.CellRoles import GENERATOR, PROCESSOR, CONSUMER
 

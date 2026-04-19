@@ -17,7 +17,7 @@ and slowly adjusts parameters to optimize motivational balance.
 """
 
 from typing import Dict, Any, List
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass

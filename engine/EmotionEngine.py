@@ -14,8 +14,7 @@ except (ImportError, OSError):
     _TORCH = False
 
 try:
-    from transformers import AutoTokenizer, AutoModel
-
+    __import__("transformers")
     _TRANSFORMERS = True
 except (ImportError, OSError):
     _TRANSFORMERS = False

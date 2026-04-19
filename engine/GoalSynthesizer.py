@@ -22,9 +22,7 @@ the outcome, and over time learns:
 from __future__ import annotations
 
 from typing import Dict, Any, List, Optional, Tuple
-from collections import defaultdict
 import random
-import hashlib
 
 try:
     import torch

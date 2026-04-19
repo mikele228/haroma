@@ -15,7 +15,7 @@ experience — learning new word→polarity associations from emotional
 context and updating existing ones via running-average feedback.
 """
 
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional
 import re
 
 try:

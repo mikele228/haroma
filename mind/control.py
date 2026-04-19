@@ -23,7 +23,6 @@ Multi-agent deployments register background ``train_step`` modules in
 """
 
 from typing import Dict, Any, List, Optional
-import os
 import threading
 import time
 
@@ -83,9 +82,9 @@ from environment.EnvironmentGrounder import EnvironmentGrounder
 from environment.ActionDispatcher import ActionDispatcher
 from engine.MentalSimulator import MentalSimulator
 from engine.ArchitectureSearcher import ArchitectureSearcher
-from engine.ComputeFabric import ComputeFabric, get_fabric
+from engine.ComputeFabric import ComputeFabric
 from engine.TrainingScheduler import TrainingScheduler
-from engine.ResourceAdaptiveConfig import detect_resources, get_resource_config, ResourceConfig
+from engine.ResourceAdaptiveConfig import detect_resources, ResourceConfig
 from core.MemoryCore import MemoryCore
 from core.Reconciliation import SymbolicReconciliationEngine
 from core.derivation_merge import merge_derivation_artifacts
@@ -109,6 +108,13 @@ from mind.cycle_flow import (
     write_processor_symbolic_queue,
 )
 from mind.deliberative_cycle_env import read_multi_goal_deliberative_env
+from mind.haroma_settings import (
+    haroma_cmem_merge_prime,
+    haroma_cmem_recall_fallback_forest,
+    haroma_cmem_recall_max_probe,
+    haroma_memory_recall_intensity,
+    haroma_recall_cmem_only,
+)
 from mind.packed_llm_controller_bridge import (
     controller_packed_llm_enabled,
     run_packed_llm_phase_for_elarion_controller,
@@ -710,21 +716,44 @@ class ElarionController:
         recall_limit = self._prev_modulation.get("recall_limit", 20)
         if _teaching:
             recall_limit = min(recall_limit + 10, 28)
+        _recall_intensity = haroma_memory_recall_intensity()
+        if 0 < _recall_intensity < 10:
+            recall_limit = max(1, (recall_limit * _recall_intensity + 9) // 10)
         _t_recall_start = time.time()
-        recalled = self.memory.recall(
-            query_tags=query_tags,
-            limit=recall_limit,
-            query_text=query_text,
-        )
-        recalled = self.memory.merge_recall_with_prime(recalled, recall_limit, fast_cycle=False)
-        if has_external and should_merge_web_learn(
-            query_text, nlu_result or {}, teaching=_teaching
-        ):
-            _wlim = web_learn_inject_max()
-            if _wlim > 0:
-                recalled = merge_web_learn_tail(
-                    self.memory, recalled, recall_limit, max_inject=_wlim
+        if _recall_intensity == 0:
+            recalled = []
+        else:
+            _cmem_only = haroma_recall_cmem_only()
+            _cmem_kw = {}
+            if _cmem_only:
+                _cmem_kw = {
+                    "tree_names": frozenset({"cmem"}),
+                    "tree_recall_max_probe": haroma_cmem_recall_max_probe(),
+                }
+            _prime_prepend = (not _cmem_only) or haroma_cmem_merge_prime()
+            recalled = self.memory.recall(
+                query_tags=query_tags,
+                limit=recall_limit,
+                query_text=query_text,
+                **_cmem_kw,
+            )
+            if _cmem_only and not recalled and haroma_cmem_recall_fallback_forest():
+                recalled = self.memory.recall(
+                    query_tags=query_tags,
+                    limit=recall_limit,
+                    query_text=query_text,
                 )
+            recalled = self.memory.merge_recall_with_prime(
+                recalled, recall_limit, fast_cycle=False, prepend_prime=_prime_prepend
+            )
+            if has_external and should_merge_web_learn(
+                query_text, nlu_result or {}, teaching=_teaching
+            ):
+                _wlim = web_learn_inject_max()
+                if _wlim > 0:
+                    recalled = merge_web_learn_tail(
+                        self.memory, recalled, recall_limit, max_inject=_wlim
+                    )
         _t_recall = time.time() - _t_recall_start
         episode.bind_memories(recalled)
 
@@ -813,7 +842,7 @@ class ElarionController:
         # ── 5. GLOBAL WORKSPACE — select + promote to WM ────────────
         ws_contents = self.workspace.select()
         episode.bind_workspace(ws_contents, self.workspace.get_unconscious())
-        integrated = self.workspace.integrate()
+        self.workspace.integrate()
 
         self.working_memory.promote_from_workspace(ws_contents, cycle=self.cycle_count)
         episode.trace("5.workspace")

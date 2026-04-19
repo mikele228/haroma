@@ -28,3 +28,20 @@ def test_no_skip_when_full_pack_dummy(monkeypatch):
     monkeypatch.setenv("HAROMA_LLM_DUMMY_REPLY", "1")
     monkeypatch.setenv("HAROMA_LLM_DUMMY_FULL_PACK", "1")
     assert should_skip_full_pack_messages_for_llm() is False
+
+
+def test_dummy_default_uses_full_pack(monkeypatch):
+    """Unset FULL_PACK with HAROMA_LLM_DUMMY_REPLY runs build_messages (no KG skip)."""
+    monkeypatch.delenv("HAROMA_LLM_CHAT_ONLY", raising=False)
+    monkeypatch.setenv("HAROMA_LLM_DUMMY_REPLY", "1")
+    monkeypatch.delenv("HAROMA_LLM_DUMMY_FULL_PACK", raising=False)
+    monkeypatch.delenv("HAROMA_LLM_DUMMY_FAST_PACK", raising=False)
+    assert should_skip_full_pack_messages_for_llm() is False
+
+
+def test_dummy_fast_pack_skips_like_legacy(monkeypatch):
+    monkeypatch.delenv("HAROMA_LLM_CHAT_ONLY", raising=False)
+    monkeypatch.setenv("HAROMA_LLM_DUMMY_REPLY", "1")
+    monkeypatch.setenv("HAROMA_LLM_DUMMY_FAST_PACK", "1")
+    monkeypatch.delenv("HAROMA_LLM_DUMMY_FULL_PACK", raising=False)
+    assert should_skip_full_pack_messages_for_llm() is True

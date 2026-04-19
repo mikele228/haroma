@@ -68,6 +68,18 @@ def test_cognitive_metrics_increments_on_over_budget():
     assert m.shared_lock_over_budget["neural_read"] == 1
 
 
+def test_neural_train_branch_names_match_background_map():
+    from core.neural_branches import NEURAL_TRAIN_BRANCH_NAMES
+    from core.training_surface import build_background_train_map
+
+    from agents.shared_resources import SharedResources
+
+    sh = SharedResources()
+    sh.initialize = lambda: None  # type: ignore[attr-defined]
+    names = [n for n, _ in build_background_train_map(sh)]
+    assert tuple(names) == NEURAL_TRAIN_BRANCH_NAMES
+
+
 def test_neural_sync_reports_hold(monkeypatch, capsys):
     from agents.shared_resources import SharedResources
 
@@ -149,7 +161,7 @@ def test_background_train_round_robin(monkeypatch):
     from contextlib import contextmanager
 
     @contextmanager
-    def _ntrain():
+    def _ntrain(*_a, **_k):
         yield
 
     shared.neural_train_sync = _ntrain  # type: ignore[attr-defined]

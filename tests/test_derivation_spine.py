@@ -3,9 +3,7 @@
 import os
 import sys
 from typing import Any, Dict
-from unittest.mock import MagicMock
 
-import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -272,7 +270,7 @@ def test_derivation_candidate_suppressed_when_llm_strong():
         "summary": "A r B",
     }
     llm = {"answer": "The answer is clear.", "confidence": 0.8}
-    ep = _ep_payload_with_derivation(deriv, llm_context=llm)
+    _ep_payload_with_derivation(deriv, llm_context=llm)
     cand = ActionGenerator._candidate_derivation(
         {
             "derivation": deriv,

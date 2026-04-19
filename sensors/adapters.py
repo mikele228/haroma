@@ -461,7 +461,7 @@ class AudioAdapter(SensorAdapter):
 
             self._sd = sd
             self._np = np
-            devs = sd.query_devices()
+            sd.query_devices()
             self._sample_rate = 16000
             self._block_size = 4096
             self.available = True
@@ -844,7 +844,8 @@ class InfraredAdapter(SensorAdapter):
         if variant in ("auto", "mlx90640"):
             try:
                 import adafruit_mlx90640
-                import board, busio
+                import board
+                import busio
 
                 i2c = busio.I2C(board.SCL, board.SDA)
                 mlx = adafruit_mlx90640.MLX90640(i2c)
@@ -861,7 +862,8 @@ class InfraredAdapter(SensorAdapter):
         if variant in ("auto", "amg8833"):
             try:
                 import adafruit_amg88xx
-                import board, busio
+                import board
+                import busio
 
                 i2c = busio.I2C(board.SCL, board.SDA)
                 self._source = adafruit_amg88xx.AMG88XX(i2c)
@@ -915,7 +917,6 @@ class InfraredAdapter(SensorAdapter):
                 }
 
             elif self._variant == "flir":
-                import numpy as np
 
                 frame = self._source.grab()
                 if frame is None:

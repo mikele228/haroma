@@ -18,9 +18,7 @@ from typing import TYPE_CHECKING, Dict, Any, List, Optional, Tuple
 
 if TYPE_CHECKING:
     from core.KnowledgeGraph import KnowledgeGraph
-from collections import deque
 import time
-import random
 
 try:
     import torch
@@ -366,11 +364,6 @@ class MetaCognitionEngine:
         if len(self._train_buffer) < 8:
             return None
 
-        batch_size = min(32, len(self._train_buffer))
-        batch = random.sample(self._train_buffer, batch_size)
-
-        _fab = _get_fabric()
-
         transformer_loss_val = 0.0
         out_loss_scalar = 0.0
         if self._transformer is not None and len(self._transformer_seq_buffer) >= 8:
@@ -557,7 +550,6 @@ class MetaCognitionEngine:
     def inspect_self(
         self, assessment: Dict[str, Any], self_surprise: Dict[str, Any], controller
     ) -> Dict[str, Any]:
-        from core.KnowledgeGraph import KnowledgeGraph
 
         temp_kg = self._build_self_kg(assessment, self_surprise, controller)
 
@@ -588,7 +580,6 @@ class MetaCognitionEngine:
                 causal_explanations.append(f"{subj} {pred} {obj}")
 
         trends = assessment.get("trends", {})
-        concerns = assessment.get("concerns", [])
 
         surprise_level = self_surprise.get("overall_surprise", 0.0)
         outcome_avg = trends.get("action_score_avg", 0.5)
@@ -757,7 +748,7 @@ class MetaCognitionEngine:
         override_count = sum(1 for s in recent if s.get("appraisal_overrides"))
         override_rate = override_count / max(len(recent), 1)
 
-        ss_first = avg(first_half, "self_surprise")
+        _ss_first = avg(first_half, "self_surprise")
         ss_second = avg(second_half, "self_surprise")
         spa_first = avg(first_half, "self_prediction_accuracy")
         spa_second = avg(second_half, "self_prediction_accuracy")

@@ -11,7 +11,6 @@ Outputs goals that the system creates for itself, not from external input.
 """
 
 from typing import Dict, Any, List, Optional, Set, Tuple
-from collections import defaultdict
 import hashlib
 import random
 from utils.module_base import ModuleBase

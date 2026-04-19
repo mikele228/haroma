@@ -153,15 +153,22 @@ def normalize_http_chat_response(result: Any) -> Any:
     ident = out.get("_chat_resolve_identity")
     ident_d = ident if isinstance(ident, dict) else None
     pn = str(out.get("persona_name") or "").strip()
-    kw = dict(
-        user_text=ut,
-        identity=ident_d,
-        persona_display_name=pn,
-    )
     if r is None or (isinstance(r, str) and not r.strip()):
-        out["response"] = resolve_chat_visible_text({"text": ""}, lc, **kw)
+        out["response"] = resolve_chat_visible_text(
+            {"text": ""},
+            lc,
+            user_text=ut,
+            identity=ident_d,
+            persona_display_name=pn,
+        )
     else:
-        out["response"] = resolve_chat_visible_text({"text": str(r)}, lc, **kw)
+        out["response"] = resolve_chat_visible_text(
+            {"text": str(r)},
+            lc,
+            user_text=ut,
+            identity=ident_d,
+            persona_display_name=pn,
+        )
     out.pop("_chat_resolve_user_text", None)
     out.pop("_chat_resolve_identity", None)
     _final = out.get("response")

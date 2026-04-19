@@ -15,9 +15,7 @@ explore and how deep, replacing the fixed max_branches=2 heuristic.
 
 from __future__ import annotations
 
-from typing import Dict, Any, List, Optional, Tuple, Set
-from copy import deepcopy
-import math
+from typing import Dict, Any, List, Optional, Set
 
 try:
     import torch

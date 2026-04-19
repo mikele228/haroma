@@ -15,7 +15,7 @@ KG → symbolic law: triples using predicates ``forbids_tag`` or ``symbolic_forb
 """
 
 from typing import Dict, Any, List, Optional, Set, Tuple
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from collections import Counter
 
 from core.cognitive_null import is_cognitive_null
@@ -685,7 +685,6 @@ class LLMReasoner:
 
         if self._inferences_accumulated >= self._RULE_INDUCTION_THRESHOLD:
             try:
-                from engine.ReasoningEngine import RuleLearner as _RL
 
                 new_rules = self.induce_rules(kg, None)
                 if new_rules:

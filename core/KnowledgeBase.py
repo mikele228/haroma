@@ -70,7 +70,7 @@ class OntologyCore(ModuleBase):
 
 
 from utils.module_base import ModuleBase
-from typing import List, Tuple, Dict, Set, Optional
+from typing import List, Tuple, Set, Optional
 
 
 class ConceptChainEngine(ModuleBase):

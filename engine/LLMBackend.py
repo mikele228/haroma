@@ -847,7 +847,8 @@ class LLMBackend:
                 raw = _gt.strip()
 
             elif provider == "ollama":
-                import urllib.request, json as _json
+                import urllib.request
+                import json as _json
 
                 prompt = self._messages_to_local_prompt(norm)
                 body = _json.dumps(
@@ -1020,7 +1021,8 @@ class LLMBackend:
                 text = _gt.strip()
 
             elif provider == "ollama":
-                import urllib.request, json as _json
+                import urllib.request
+                import json as _json
 
                 body = _json.dumps(
                     {

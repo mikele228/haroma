@@ -15,8 +15,13 @@ Design choices
 * Confidence, citations, ``requires_confirmation``, and ``body_actions``
   (embodiment aligned to active goals) let downstream modules decide trust level.
 
-Env (debug / probe)
--------------------
+Env (development / probe — not production modes)
+------------------------------------------------
+The following flags exist for tests and local profiling. They may be removed or
+superseded; **do not** treat them as the supported way to tune production ``/chat``
+latency (that is :class:`~agents.persona_agent.PersonaAgent` HTTP-trace recall,
+phasing, and budgets).
+
 * ``HAROMA_LLM_LOG_PACKED_STATS`` (``1``/``true``): after ``build_messages``,
   log one line with UTF-8 byte size, character count, rough token estimate
   (chars/4), and per-role character counts.
@@ -44,14 +49,13 @@ Env (debug / probe)
   set, it is parsed with ``parse_response`` instead of the built-in synthetic
   object (still tagged ``dummy_probe``). Invalid JSON falls back to the built-in
   synthetic JSON.
-* ``HAROMA_LLM_DUMMY_FULL_PACK`` (``1``/``true``): on synthetic paths (env dummy
-  or no backend), run the full ``build_messages`` path (slow if recall/KG is huge).
-  **Default:** skip full packing and use a tiny placeholder prompt (faster *inside
-  this module only*).
-  **Pipeline profiling:** dummy skips only ``generate_chat`` here; PersonaAgent still
-  runs perception, ``neural_sync``, recall, etc., so HTTP latency reflects the real
-  pipeline minus native decode. Use unset ``FULL_PACK`` to isolate non-pack work, or
-  set it to measure packed prompt build cost.
+* ``HAROMA_LLM_DUMMY_FULL_PACK`` (``0``/``false``): with ``HAROMA_LLM_DUMMY_REPLY``,
+  use a tiny placeholder prompt instead of ``build_messages`` (legacy fast probe).
+  **Default when dummy is set:** full ``build_messages`` (honest latency vs production
+  minus decode). Set ``HAROMA_LLM_DUMMY_FAST_PACK=1`` for the same minimal prompt
+  without setting ``FULL_PACK=0``.
+  **No backend** (dummy env unset): unchanged — full pack only if
+  ``HAROMA_LLM_DUMMY_FULL_PACK`` is truthy.
 * ``HAROMA_LLM_CHAT_ONLY`` (``1``/``true``): send only the user line as a
   single user message (no soul, recall, KG, or JSON schema). The model reply
   is treated as plain text (not JSON). For JSON-style packed chat, leave
@@ -81,6 +85,7 @@ from typing import Any, Dict, List, Optional
 
 from mind.packed_llm_context import host_environment_sections_for_prompt
 from mind.haroma_settings import synthetic_llm_dummy_reply_env
+from mind.packed_llm_inputs import synthetic_uses_placeholder_prompt
 from mind.response_text import clean_packed_json_answer_text, sanitize_llm_plain_answer
 
 
@@ -1182,12 +1187,13 @@ def run_llm_context_reasoning(
             "no packed soul/recall/KG (plain text reply, not JSON).",
             flush=True,
         )
-    elif _use_synthetic and not _env_truthy("HAROMA_LLM_DUMMY_FULL_PACK"):
+    elif _use_synthetic and synthetic_uses_placeholder_prompt(_dummy):
         _ut = (user_text or "").strip() or "."
         messages = [{"role": "user", "content": _ut}]
         print(
-            "[LLMContextReasoner] synthetic reply path — skipping full "
-            "build_messages (set HAROMA_LLM_DUMMY_FULL_PACK=1 for full pack timing).",
+            "[LLMContextReasoner] synthetic path — minimal placeholder prompt "
+            "(use HAROMA_LLM_DUMMY_FAST_PACK=1 or HAROMA_LLM_DUMMY_FULL_PACK=0; "
+            "default dummy mode runs full build_messages).",
             flush=True,
         )
     else:

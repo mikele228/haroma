@@ -44,7 +44,6 @@ def decode_base64_audio_to_waveform(b64: str) -> np.ndarray:
     try:
         raw = base64.b64decode(b64)
         try:
-            import librosa
             import soundfile as sf
 
             y, sr = sf.read(BytesIO(raw), dtype="float32", always_2d=False)

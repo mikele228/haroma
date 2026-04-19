@@ -15,6 +15,9 @@ from dataclasses import dataclass
 
 from mind.config_env import env_int, env_truthy
 
+# Upper bound for ``HAROMA_DIALOGUE_PHASE`` (see :mod:`mind.dialogue_phases`).
+HAROMA_DIALOGUE_PHASE_MAX = 9
+
 
 def synthetic_llm_dummy_reply_env() -> bool:
     """``HAROMA_LLM_DUMMY_REPLY`` — skip native ``generate_chat`` (dummy / probe)."""
@@ -50,6 +53,89 @@ def elarion_cycle_flow_debug() -> bool:
 def haroma_state_prompt_max_chars() -> int:
     """``HAROMA_STATE_PROMPT_MAX_CHARS`` — cap for state JSON in prompts (clamped)."""
     return max(512, min(100_000, env_int("HAROMA_STATE_PROMPT_MAX_CHARS", 3000)))
+
+
+def haroma_dialogue_phase() -> int:
+    """``HAROMA_DIALOGUE_PHASE`` — dialogue roadmap tier (1–9). See :mod:`mind.dialogue_phases`."""
+    try:
+        p = int(str(os.environ.get("HAROMA_DIALOGUE_PHASE", "1") or "1").strip())
+    except (TypeError, ValueError):
+        p = 1
+    return max(1, min(HAROMA_DIALOGUE_PHASE_MAX, p))
+
+
+def haroma_dialogue_eval_log_enabled() -> bool:
+    """``HAROMA_DIALOGUE_EVAL_LOG`` — stderr one line per enriched discourse when phase >= 3."""
+    return env_truthy("HAROMA_DIALOGUE_EVAL_LOG", default=False)
+
+
+def haroma_memory_recall_intensity() -> int:
+    """``HAROMA_MEMORY_RECALL_INTENSITY`` — semantic recall strength (0–10).
+
+    * **0** — skip recall entirely (no retrieved memories this cycle).
+    * **10** — use the full computed recall limit (default; same as unset).
+    * **1–9** — scale the effective ``recall_limit`` down: ``ceil(limit * intensity / 10)``.
+    """
+    try:
+        v = int(str(os.environ.get("HAROMA_MEMORY_RECALL_INTENSITY", "10") or "10").strip())
+    except (TypeError, ValueError):
+        v = 10
+    return max(0, min(10, v))
+
+
+def haroma_recall_cmem_only() -> bool:
+    """``HAROMA_RECALL_CMEM_ONLY`` — prefer semantic recall from ``cmem`` tree only."""
+    return env_truthy("HAROMA_RECALL_CMEM_ONLY", default=False)
+
+
+def haroma_cmem_recall_fallback_forest() -> bool:
+    """``HAROMA_CMEM_RECALL_FALLBACK_FOREST`` — if cmem-only recall finds nothing, run full-forest dense recall.
+
+    Default **off**: an empty or tiny ``cmem`` tree should not trigger an expensive
+    scan of the entire semantic index (can dominate latency on large forests).
+    Set to ``1`` to restore the previous “never empty recall” behavior.
+    """
+    return env_truthy("HAROMA_CMEM_RECALL_FALLBACK_FOREST", default=False)
+
+
+def haroma_cmem_build_enabled() -> bool:
+    """``HAROMA_CMEM_BUILD_ENABLED`` — BackgroundAgent writes consolidated nodes into ``cmem`` (default on)."""
+    return env_truthy("HAROMA_CMEM_BUILD_ENABLED", default=True)
+
+
+def haroma_cmem_recall_max_probe() -> int:
+    """``HAROMA_CMEM_RECALL_MAX_PROBE`` — max dense index neighbors to scan when filtering by tree (default 2000)."""
+    return max(64, min(500_000, env_int("HAROMA_CMEM_RECALL_MAX_PROBE", 2000)))
+
+
+def haroma_cmem_merge_prime() -> bool:
+    """``HAROMA_CMEM_MERGE_PRIME`` — when cmem-only recall, still prepend nexus ``prime`` nodes (default off)."""
+    return env_truthy("HAROMA_CMEM_MERGE_PRIME", default=False)
+
+
+def haroma_cmem_build_every_n_ticks() -> int:
+    """``HAROMA_CMEM_BUILD_EVERY_N_TICKS`` — run cmem builder every N BackgroundAgent ticks (default 4)."""
+    try:
+        v = int(str(os.environ.get("HAROMA_CMEM_BUILD_EVERY_N_TICKS", "4") or "4").strip())
+    except (TypeError, ValueError):
+        v = 4
+    return max(1, min(100, v))
+
+
+def haroma_cmem_build_max_nodes_per_tick() -> int:
+    """``HAROMA_CMEM_BUILD_MAX_NODES_PER_TICK`` — max new ``cmem`` nodes per builder run (default 12)."""
+    return max(1, min(500, env_int("HAROMA_CMEM_BUILD_MAX_NODES_PER_TICK", 12)))
+
+
+def haroma_cmem_bootstrap_max_nodes() -> int:
+    """``HAROMA_CMEM_BOOTSTRAP_MAX_NODES`` — one-time boot fill when ``cmem`` is empty (default 128)."""
+    return max(32, min(2000, env_int("HAROMA_CMEM_BOOTSTRAP_MAX_NODES", 128)))
+
+
+def haroma_cmem_max_total_nodes() -> int:
+    """``HAROMA_CMEM_MAX_TOTAL_NODES`` — max ``cmem`` nodes across all branches; 0 = unlimited (default)."""
+    v = env_int("HAROMA_CMEM_MAX_TOTAL_NODES", 0)
+    return max(0, min(2_000_000, v))
 
 
 @dataclass(frozen=True)

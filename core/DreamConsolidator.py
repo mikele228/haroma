@@ -1,11 +1,21 @@
 """
 DreamConsolidator — real memory consolidation for HaromaX6.
 
+Design split:
+  * **Dream content** (``dream_tree``) is disposable: old or low-salience dream
+    nodes may be **pruned** to save space.
+  * **Episodic / thought memories** are **not** pruned here — they stay so the
+    agent can drill down into specifics later.
+  * **Compress / abstraction** add retrieval-friendly summary nodes for
+    **recall**; source episodes remain in the forest, and compressed nodes
+    carry ``merge_of:`` tags so callers can “zoom in” to the originals.
+
 Six consolidation operations:
   1. Replay    — re-score high-salience memories under current emotion
-  2. Compress  — merge highly similar memory pairs into abstractions
+  2. Compress  — merge highly similar pairs into abstract nodes (sources kept;
+                 abstractions tagged for drill-down)
   3. Pattern   — detect recurring (tag, emotion) co-occurrences
-  4. Prune     — forget low-significance old memories
+  4. Prune     — forget aged low-salience nodes in **dream_tree** only
   5. Episodic replay with reconsolidation (Phase 14)
   6. Neural abstraction via autoencoder clustering (Upgrade 9)
 
@@ -393,7 +403,12 @@ class DreamConsolidator:
                 content=f"[abstraction] {merged_content}",
                 emotion=node_a.emotion or node_b.emotion,
                 confidence=avg_conf,
-                tags=combined_tags + ["compressed"],
+                tags=combined_tags
+                + [
+                    "compressed",
+                    "recall_abstraction",
+                    f"merge_of:{node_a.moment_id}:{node_b.moment_id}",
+                ],
             )
             self.memory.add_node("thought_tree", "consolidation", abstract_node)
             node_b.confidence *= 0.3
@@ -436,31 +451,39 @@ class DreamConsolidator:
         return insights[:8]
 
     # ------------------------------------------------------------------
-    # 4. Prune
+    # 4. Prune (dream_tree only — episodic trees are retained)
     # ------------------------------------------------------------------
 
     def _prune(self) -> int:
-        total_nodes = self.memory.count_nodes()
-        if total_nodes < 100:
+        """Drop aged, low-salience **dream** nodes only.
+
+        Thought / experience / consolidation branches are not candidates here;
+        see module docstring.
+        """
+        dream_tree = self.memory.trees.get("dream_tree")
+        if not dream_tree:
+            return 0
+
+        if sum(len(b.nodes) for b in dream_tree.branches.values()) == 0:
             return 0
 
         pruned = 0
-        cutoff = time.time() - 600
+        cutoff = time.time() - 600.0
 
-        # Collect moment_ids to remove (don't mutate during iteration)
         to_remove_ids: List[str] = []
-        for tree in self.memory.trees.values():
-            for branch in tree.branches.values():
-                branch_removals = 0
-                for node in branch.nodes:
-                    if branch_removals >= 10:
-                        break
-                    if node.timestamp > cutoff:
-                        continue
-                    if node.confidence < 0.2 and "immutable" not in node.tags:
-                        if "soul" not in node.tags and "essence" not in node.tags:
-                            to_remove_ids.append(node.moment_id)
-                            branch_removals += 1
+        for branch in dream_tree.branches.values():
+            branch_removals = 0
+            for node in branch.nodes:
+                if branch_removals >= 15:
+                    break
+                if node.timestamp > cutoff:
+                    continue
+                if node.confidence >= 0.2:
+                    continue
+                if "immutable" in node.tags or "soul" in node.tags or "essence" in node.tags:
+                    continue
+                to_remove_ids.append(node.moment_id)
+                branch_removals += 1
 
         for mid in to_remove_ids:
             if self.memory.remove_node(mid):
@@ -531,9 +554,9 @@ class DreamConsolidator:
     ) -> Dict[str, Any]:
         original_emotion = node.emotion or "neutral"
 
-        new_embedding = None
+        _new_embedding = None
         if hasattr(controller, "encoder") and controller.encoder.available:
-            new_embedding = controller.encoder.encode(node.content)
+            _new_embedding = controller.encoder.encode(node.content)
 
         new_appraisal = {}
         if hasattr(controller, "appraisal"):

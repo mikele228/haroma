@@ -15,7 +15,7 @@ from collections import defaultdict
 from typing import Any, Dict, List, Optional
 
 from core.Memory import MemoryNode
-from core.MemoryCore import MemoryCore, AGENT_PREFIX, COMMON_BRANCH
+from core.MemoryCore import MemoryCore, AGENT_PREFIX
 
 
 # ═══════════════════════════════════════════════════════════════════════

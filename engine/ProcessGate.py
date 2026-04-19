@@ -12,7 +12,6 @@ If PyTorch is unavailable the class degrades to "run everything".
 from __future__ import annotations
 
 from typing import Dict, Any, List, Optional
-import math
 import threading
 
 try:

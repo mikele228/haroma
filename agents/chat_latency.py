@@ -4,10 +4,10 @@ Optional wall-time tracing for HTTP /chat: spans from InputAgent through Persona
 Enable with POST ``{"trace_latency": true}`` or env ``HAROMA_CHAT_TRACE=1``.
 Response includes ``latency_trace``: ``{ "total_ms", "spans": [{ "phase", "ms" }] }``.
 
-**Dummy / probe mode:** with ``HAROMA_LLM_DUMMY_REPLY=1``, latency tracing is
-**turned on automatically** for each chat turn (same ``latency_trace`` payload)
-so you can measure end-to-end time without a second flag. Opt out with
-``HAROMA_LLM_DUMMY_NO_LATENCY_TRACE=1`` if you need a smaller JSON body.
+**Dev probe (``HAROMA_LLM_DUMMY_REPLY``):** skips real decode; tracing is enabled
+automatically for each turn unless ``HAROMA_LLM_DUMMY_NO_LATENCY_TRACE=1``. This is
+for local measurement only — use ``trace_latency`` / ``HAROMA_CHAT_TRACE`` for
+production-style tracing with a real backend.
 
 Dummy-reply env semantics are centralized in :mod:`mind.packed_llm_dummy_env` and
 re-exported here for backward compatibility.
@@ -29,8 +29,6 @@ from typing import Any, Dict, List, Optional
 
 from mind.cognitive_observability import append_cognitive_trace_to_payload
 from mind.packed_llm_dummy_env import (
-    packed_llm_dummy_probe_active,
-    packed_llm_dummy_reply_raw,
     synthetic_llm_dummy_reply_env,
 )
 

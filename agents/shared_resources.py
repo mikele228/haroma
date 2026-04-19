@@ -32,6 +32,11 @@ from typing import Any, Dict, Iterator, List, Optional
 
 from core.MeaningLexicon import MeaningLexicon
 from core.self_model_train_batch import SelfModelTrainBatch
+from core.neural_branches import (
+    NEURAL_TRAIN_BRANCH_NAMES,
+    normalize_neural_branches,
+    neural_lock_mode,
+)
 from core.concurrency import ConcurrencyCoordinator, NeuralRWLock
 from mind.lock_budget import report_shared_lock_section
 from core.cognitive_null import CognitiveNull, is_cognitive_null
@@ -780,44 +785,131 @@ class SharedResources:
             self.cycle_count += 1
             return self.cycle_count
 
-    def _neural_rw_lock(self) -> NeuralRWLock:
+    def _neural_rw_lock_global(self) -> NeuralRWLock:
         rw = getattr(self, "_neural_rw", None)
         if rw is None:
             rw = NeuralRWLock()
             self._neural_rw = rw
         return rw
 
-    @contextlib.contextmanager
-    def neural_sync(self) -> Iterator[None]:
-        """Shared **inference** lock (read side): encoder forward + persona forwards.
+    def _neural_rw_for_branch(self, name: str) -> NeuralRWLock:
+        key = str(name).strip() or "encoder"
+        mtx = getattr(self, "_neural_branch_locks_mutex", None)
+        if mtx is None:
+            mtx = threading.Lock()
+            self._neural_branch_locks_mutex = mtx
+        with mtx:
+            d = getattr(self, "_neural_branch_locks", None)
+            if d is None:
+                self._neural_branch_locks = {}
+                d = self._neural_branch_locks
+            rw = d.get(key)
+            if rw is None:
+                rw = NeuralRWLock()
+                d[key] = rw
+            return rw
 
-        Multiple threads may hold this concurrently. Background training uses
-        :meth:`neural_train_sync` (write side), which waits for all readers.
+    @staticmethod
+    def _neural_read_report_label(names: list[str]) -> str:
+        if neural_lock_mode() == "global" or not names:
+            return "neural_read"
+        if len(names) == 1:
+            return f"neural_read:{names[0]}"
+        joined = "+".join(names)
+        if len(joined) <= 48:
+            return f"neural_read:{joined}"
+        return f"neural_read:{len(names)}br"
+
+    @contextlib.contextmanager
+    def neural_sync(self, *branches: str) -> Iterator[None]:
+        """Shared **inference** read lock(es) for forward passes.
+
+        With ``HAROMA_NEURAL_LOCK_MODE=per_branch`` (default), pass branch names
+        (see :data:`core.neural_branches.NEURAL_TRAIN_BRANCH_NAMES`) so only those
+        modules are locked; training may write a *different* branch concurrently.
+
+        With no arguments in per-branch mode, read-locks **all** known branches
+        (same contention as legacy for full-stack callers). Use
+        ``HAROMA_NEURAL_LOCK_MODE=global`` for a single lock.
+
+        Background training uses :meth:`neural_train_sync` (write) per branch.
 
         Hold time is checked against ``HAROMA_SHARED_LOCK_BUDGET_SEC`` (see
         :mod:`mind.lock_budget`); keep critical sections short.
         """
-        rw = self._neural_rw_lock()
+        if neural_lock_mode() == "global":
+            rw = self._neural_rw_lock_global()
+            t_wait0 = time.perf_counter()
+            rw.acquire_read()
+            t_hold0 = time.perf_counter()
+            try:
+                yield
+            finally:
+                hold_sec = time.perf_counter() - t_hold0
+                rw.release_read()
+                wait_sec = t_hold0 - t_wait0
+                report_shared_lock_section(
+                    "neural_read",
+                    wait_sec=wait_sec,
+                    hold_sec=hold_sec,
+                    cognitive_metrics=getattr(self, "cognitive_metrics", None),
+                )
+            return
+
+        names = (
+            normalize_neural_branches(branches)
+            if branches
+            else list(NEURAL_TRAIN_BRANCH_NAMES)
+        )
+        if not names:
+            names = list(NEURAL_TRAIN_BRANCH_NAMES)
+        locks = [self._neural_rw_for_branch(n) for n in names]
+        label = self._neural_read_report_label(names)
         t_wait0 = time.perf_counter()
-        rw.acquire_read()
+        for rw in locks:
+            rw.acquire_read()
         t_hold0 = time.perf_counter()
         try:
             yield
         finally:
             hold_sec = time.perf_counter() - t_hold0
-            rw.release_read()
+            for rw in reversed(locks):
+                rw.release_read()
             wait_sec = t_hold0 - t_wait0
             report_shared_lock_section(
-                "neural_read",
+                label,
                 wait_sec=wait_sec,
                 hold_sec=hold_sec,
                 cognitive_metrics=getattr(self, "cognitive_metrics", None),
             )
 
     @contextlib.contextmanager
-    def neural_train_sync(self) -> Iterator[None]:
-        """Exclusive **training** lock (write side). Waits for inference readers."""
-        rw = self._neural_rw_lock()
+    def neural_train_sync(self, branch: str) -> Iterator[None]:
+        """Exclusive **training** write lock for one branch (module name).
+
+        Inference readers on the same branch wait; other branches may proceed.
+        Pass the same string as keys in :func:`core.training_surface.build_background_train_map`.
+        """
+        b = str(branch).strip() or "encoder"
+        if neural_lock_mode() == "global":
+            rw = self._neural_rw_lock_global()
+            t_wait0 = time.perf_counter()
+            rw.acquire_write()
+            t_hold0 = time.perf_counter()
+            try:
+                yield
+            finally:
+                hold_sec = time.perf_counter() - t_hold0
+                rw.release_write()
+                report_shared_lock_section(
+                    "neural_train_write",
+                    wait_sec=t_hold0 - t_wait0,
+                    hold_sec=hold_sec,
+                    cognitive_metrics=getattr(self, "cognitive_metrics", None),
+                )
+            return
+
+        rw = self._neural_rw_for_branch(b)
         t_wait0 = time.perf_counter()
         rw.acquire_write()
         t_hold0 = time.perf_counter()
@@ -827,18 +919,21 @@ class SharedResources:
             hold_sec = time.perf_counter() - t_hold0
             rw.release_write()
             report_shared_lock_section(
-                "neural_train_write",
+                f"neural_train_write:{b}",
                 wait_sec=t_hold0 - t_wait0,
                 hold_sec=hold_sec,
                 cognitive_metrics=getattr(self, "cognitive_metrics", None),
             )
 
     @contextlib.contextmanager
-    def persona_neural_section(self) -> Iterator[None]:
+    def persona_neural_section(self, *branches: str) -> Iterator[None]:
         """Persona cognitive segments: serial vs other personas, read lock for weights.
 
         InputAgent uses only :meth:`neural_sync` so chat encoding can overlap one
         persona's neural work without blocking on the other persona's cycle.
+
+        Branch arguments match :meth:`neural_sync`; empty means all branches in
+        per-branch mode.
 
         Inlines the neural read lock (does not nest :meth:`neural_sync`) so hold
         time is reported once as ``persona_neural_section``.
@@ -847,16 +942,46 @@ class SharedResources:
         if lock is None:
             lock = threading.Lock()
             self._persona_cycle_lock = lock
-        rw = self._neural_rw_lock()
+
+        if neural_lock_mode() == "global":
+            rw = self._neural_rw_lock_global()
+            t_wait0 = time.perf_counter()
+            with lock:
+                rw.acquire_read()
+                t_after_read = time.perf_counter()
+                try:
+                    yield
+                finally:
+                    hold_sec = time.perf_counter() - t_after_read
+                    rw.release_read()
+                    wait_sec = t_after_read - t_wait0
+                    report_shared_lock_section(
+                        "persona_neural_section",
+                        wait_sec=wait_sec,
+                        hold_sec=hold_sec,
+                        cognitive_metrics=getattr(self, "cognitive_metrics", None),
+                    )
+            return
+
+        names = (
+            normalize_neural_branches(branches)
+            if branches
+            else list(NEURAL_TRAIN_BRANCH_NAMES)
+        )
+        if not names:
+            names = list(NEURAL_TRAIN_BRANCH_NAMES)
+        locks = [self._neural_rw_for_branch(n) for n in names]
         t_wait0 = time.perf_counter()
         with lock:
-            rw.acquire_read()
+            for rw in locks:
+                rw.acquire_read()
             t_after_read = time.perf_counter()
             try:
                 yield
             finally:
                 hold_sec = time.perf_counter() - t_after_read
-                rw.release_read()
+                for rw in reversed(locks):
+                    rw.release_read()
                 wait_sec = t_after_read - t_wait0
                 report_shared_lock_section(
                     "persona_neural_section",

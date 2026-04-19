@@ -12,7 +12,7 @@ Boot performance:
   - Every load step is timed and logged.
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 import json
 import os
 import pickle
@@ -389,7 +389,6 @@ class CognitivePersistence:
                 all_snaps = {}
                 for prof in profiles:
                     snap = prof.snapshot()
-                    base_keys = list(snap.get("baseline", {}).keys())
                     agent_id = getattr(prof, "_owner_id", None) or f"idx_{profiles.index(prof)}"
                     all_snaps[agent_id] = snap
                 self._write_json("personality_profiles.json", all_snaps)
@@ -513,7 +512,7 @@ class CognitivePersistence:
         # -- try bulk pickle cache first (covers all JSON files) -------
         bulk_cache = self._try_load_bulk_cache()
         if bulk_cache is not None:
-            print(f"    [LOAD] Using bulk pickle cache", flush=True)
+            print("    [LOAD] Using bulk pickle cache", flush=True)
 
         def _cached_read_json(name):
             """Read from bulk cache if available, else from disk."""
@@ -917,7 +916,7 @@ class CognitivePersistence:
                         print(f"    [LOAD] bg    {label:25s} {dt:.2f}s", flush=True)
                     except Exception as e:
                         print(f"    [LOAD] bg-FAIL {label:25s} {e}", flush=True)
-                print(f"    [LOAD] Deferred loads complete", flush=True)
+                print("    [LOAD] Deferred loads complete", flush=True)
                 _deferred_done.set()
 
             t = threading.Thread(target=_run_deferred, daemon=True)

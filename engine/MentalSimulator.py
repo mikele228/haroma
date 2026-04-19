@@ -11,7 +11,6 @@ from __future__ import annotations
 
 from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, field
-from collections import defaultdict
 
 try:
     import torch

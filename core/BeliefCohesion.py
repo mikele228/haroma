@@ -298,7 +298,6 @@ class CoherenceEvaluator:
 
 from utils.module_base import ModuleBase
 from typing import Dict, Any, List, Set, Optional
-import time
 
 
 class BeliefReflector(ModuleBase):

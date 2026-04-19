@@ -283,7 +283,7 @@ class AudioPluginAnalysis:
 
 # === MAX++ UPGRADED MODULE ===
 import numpy as np
-from typing import Optional, List, Dict, Any
+from typing import List, Dict, Any
 
 
 class AudioSymbolicPerceptor:
@@ -346,7 +346,7 @@ class AudioSymbolicPerceptor:
         return thought
 
     def __repr__(self):
-        return f"<AudioSymbolicPerceptor TierMAX++>"
+        return "<AudioSymbolicPerceptor TierMAX++>"
 
 
 # === MAX UPGRADED MODULE ===
@@ -420,7 +420,6 @@ class PerceptualSynthesizer:
 # === MAX++ UPGRADED MODULE ===
 from utils.module_base import ModuleBase
 from typing import Dict, Any, Optional, List
-import time
 import math
 
 
@@ -521,8 +520,6 @@ class ContextBuilder(ModuleBase):
 # === MAX++ UPGRADED MODULE ===
 from collections import deque
 from typing import List, Dict, Optional, Any
-import time
-import math
 
 
 class PerceptionBuffer:
@@ -592,7 +589,6 @@ class PerceptionBuffer:
 # === MAX++ UPGRADED MODULE ===
 from utils.module_base import ModuleBase
 from typing import Any, Dict, List, Optional
-import time
 
 
 class SensoryBridge(ModuleBase):
@@ -650,7 +646,7 @@ class SensoryBridge(ModuleBase):
 
 
 # === MAX++ UPDATED MODULE ===
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any
 import numpy as np
 
 
@@ -712,7 +708,6 @@ class SmellMemoryAnalysis:
 
 
 # === MAX++ UPDATED MODULE ===
-from utils.sense_transform import SenseTransform
 from typing import Optional, List, Dict, Any
 import numpy as np
 
@@ -908,7 +903,7 @@ class TagExtractor:
 
 
 # === MAX++ UPDATED MODULE ===
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any
 import numpy as np
 
 
@@ -969,7 +964,6 @@ class TasteMemoryAnalysis:
 
 
 # === MAX++ UPDATED MODULE ===
-from utils.sense_transform import SenseTransform
 from typing import Optional, List, Dict, Any
 import numpy as np
 
@@ -1114,7 +1108,7 @@ class TextInterpreter(ModuleBase):
 
 
 # === MAX++ UPDATED MODULE ===
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any
 
 
 class TouchMemoryAnalysis:
@@ -1174,7 +1168,6 @@ class TouchMemoryAnalysis:
 
 
 # === MAX++ UPDATED MODULE ===
-from utils.sense_transform import SenseTransform
 from typing import Optional, List, Dict, Any
 
 
@@ -1302,7 +1295,7 @@ class TouchSymbolicPerceptor:
 
 
 # === MAX++ UPDATED MODULE ===
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any
 import numpy as np
 
 
@@ -1382,7 +1375,6 @@ class VisualMemoryAnalysis:
 # === MAX++ UPDATED MODULE ===
 from typing import List, Dict, Any
 import numpy as np
-from utils.sense_transform import SenseTransform
 from PIL import Image
 
 
@@ -1397,7 +1389,6 @@ class VisualPluginAnalysis:
         self.logs: List[Dict[str, Any]] = []
 
     def analyze_image(self, image_dict: Dict[str, np.ndarray]) -> Dict[str, Any]:
-        tags = []
         try:
             images = [Image.fromarray(arr.astype(np.uint8)) for arr in image_dict.values()]
             base_image = images[0].copy()

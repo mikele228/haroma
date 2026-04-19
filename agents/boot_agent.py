@@ -206,6 +206,10 @@ class BootAgent(BaseAgent):
         # 8. Pre-warm semantic index (fully non-blocking)
         self._prewarm_memory_index()
 
+        # 8b. Fill ``cmem`` from ``thought_tree`` when empty (before first BackgroundAgent tick)
+        if self.background_agent is not None:
+            self.background_agent.bootstrap_cmem_if_needed()
+
         elapsed = time.time() - t0
         status = "OK" if elapsed <= self._BOOT_DEADLINE else "SLOW"
         print(

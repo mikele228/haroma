@@ -1,6 +1,5 @@
 """Per-persona semantic encoder resolution (no torch required)."""
 
-import pytest
 
 from agents.shared_resources import SharedResources
 

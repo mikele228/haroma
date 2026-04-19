@@ -11,9 +11,8 @@ less frequently; modules with high loss train more often.
 
 from __future__ import annotations
 
-from typing import Dict, Any, List, Tuple, Optional, Callable
+from typing import Dict, Any, List, Tuple, Optional
 import random
-import math
 
 
 class PrioritizedBuffer:

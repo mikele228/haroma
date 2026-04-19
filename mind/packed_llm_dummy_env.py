@@ -15,3 +15,10 @@ from mind.haroma_settings import (
 def packed_llm_dummy_probe_active() -> bool:
     """Alias for :func:`synthetic_llm_dummy_reply_env`."""
     return synthetic_llm_dummy_reply_env()
+
+
+__all__ = [
+    "packed_llm_dummy_probe_active",
+    "packed_llm_dummy_reply_raw",
+    "synthetic_llm_dummy_reply_env",
+]

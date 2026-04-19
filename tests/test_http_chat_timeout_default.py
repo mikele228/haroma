@@ -1,6 +1,5 @@
 """HTTP /chat wait vs packed LLM caps."""
 
-import os
 
 
 def test_http_wait_normal_covers_llm_cap(monkeypatch):

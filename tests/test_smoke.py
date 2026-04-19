@@ -37,7 +37,7 @@ def main():
     boot_time = time.time() - t0
     print(f"  Boot time: {boot_time:.1f}s")
     if boot_time <= 30.0:
-        print(f"  PASS: Boot under 30s deadline")
+        print("  PASS: Boot under 30s deadline")
     else:
         print(f"  WARN: Boot exceeded 30s deadline ({boot_time:.1f}s)")
 

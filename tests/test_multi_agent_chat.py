@@ -124,7 +124,7 @@ def test_fast_path(boot: BootAgent):
             break
         time.sleep(2.0)
     else:
-        print(f"  TIMEOUT: TrueSelf did not complete a cycle in 120s")
+        print("  TIMEOUT: TrueSelf did not complete a cycle in 120s")
         print(
             f"    ticks={trueself._tick_count}, "
             f"cycles={trueself._cycle_count}, "
@@ -133,12 +133,12 @@ def test_fast_path(boot: BootAgent):
 
     if slot["event"].is_set() and slot.get("result"):
         result = slot["result"]
-        print(f"\n  Response received:")
+        print("\n  Response received:")
         print(f"    Persona: {result.get('persona', '?')} ({result.get('persona_name', '?')})")
         print(f"    Response: {result.get('response', '')[:120]}")
         print(f"    Strategy: {result.get('strategy', '?')}")
     else:
-        print(f"\n  No HTTP response yet (may be expected with 'none' LLM)")
+        print("\n  No HTTP response yet (may be expected with 'none' LLM)")
 
     with _DELEGATION_LOCK:
         new_delegations = len(_DELEGATION_LOG) - initial_delegation_count
@@ -188,7 +188,7 @@ def test_delegation(boot: BootAgent):
         time.sleep(2.0)
 
     if delegation_seen:
-        print(f"\n  Delegation confirmed, waiting for persona to process...")
+        print("\n  Delegation confirmed, waiting for persona to process...")
         process_deadline = time.time() + 120.0
         while time.time() < process_deadline:
             persona_cycles_now = {p.agent_id: p._cycle_count for p in boot.persona_agents}
@@ -203,7 +203,7 @@ def test_delegation(boot: BootAgent):
 
     if slot["event"].is_set() and slot.get("result"):
         result = slot["result"]
-        print(f"\n  Response received:")
+        print("\n  Response received:")
         print(f"    Persona: {result.get('persona', '?')} ({result.get('persona_name', '?')})")
         print(f"    Response: {result.get('response', '')[:120]}")
         print(f"    Strategy: {result.get('strategy', '?')}")
@@ -212,7 +212,7 @@ def test_delegation(boot: BootAgent):
         else:
             print("  Response returned (may be fast-path fallback)")
     else:
-        print(f"\n  No HTTP response yet (may need longer timeout)")
+        print("\n  No HTTP response yet (may need longer timeout)")
 
     with _DELEGATION_LOCK:
         total_delegations = len(_DELEGATION_LOG) - initial_delegation_count

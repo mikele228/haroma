@@ -28,7 +28,6 @@ overrides ``soul/agents.json`` input.tick_interval (BootAgent).
 from __future__ import annotations
 
 import os
-import re
 import threading
 import time
 from collections import deque
@@ -343,7 +342,7 @@ class InputAgent(BaseAgent):
         if _encoder_real and content and not _skip_enc:
             try:
                 log_input_pipeline("input.before_encoder_neural_sync", trace_id=_ptid)
-                with self.shared.neural_sync():
+                with self.shared.neural_sync("encoder"):
                     raw_emb = self.shared.encoder.encode(content)
                 if raw_emb is not None:
                     expected = self.shared.encoder._embed_dim

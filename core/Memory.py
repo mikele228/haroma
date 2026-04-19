@@ -1,4 +1,4 @@
-from typing import List, Dict, Optional, Any, Tuple, Set
+from typing import AbstractSet, List, Dict, Optional, Any, Tuple, Set
 import os
 import threading
 import time
@@ -146,8 +146,7 @@ class MemoryTree:
 
 
 try:
-    from sentence_transformers import SentenceTransformer as _SentenceTransformer
-
+    __import__("sentence_transformers")
     _HAS_SBERT = True
 except (ImportError, OSError):
     # OSError: e.g. WinError 1114 when torch/sentence_transformers native DLLs fail to load
@@ -200,6 +199,14 @@ class SemanticIndex:
         self._lock = threading.RLock()
         self._encode_lock = threading.Lock()
 
+        # Dedicated dense retrieval for ``tree == \"cmem\"`` only (small FAISS / flat IP).
+        self._cmem_dirty: bool = True
+        # Indices into ``self.nodes`` for cmem rows — avoids scanning the full forest on rebuild.
+        self._cmem_node_indices: Set[int] = set()
+        self._cmem_nodes: List["MemoryNode"] = []
+        self._cmem_dense: Optional[np.ndarray] = None
+        self._cmem_faiss: Optional[Any] = None
+
         if _HAS_SBERT:
             try:
                 from engine.ModelCache import get_sbert
@@ -226,11 +233,18 @@ class SemanticIndex:
             self.nodes.append(node)
             self._node_to_idx[node.moment_id] = idx
             self._dirty = True
+            if getattr(node, "tree", None) == "cmem":
+                self._cmem_dirty = True
+                self._cmem_node_indices.add(idx)
 
     def remove(self, node: "MemoryNode"):
         with self._lock:
+            if getattr(node, "tree", None) == "cmem":
+                self._cmem_dirty = True
             idx = self._node_to_idx.pop(node.moment_id, None)
             if idx is not None:
+                if getattr(node, "tree", None) == "cmem":
+                    self._cmem_node_indices.discard(idx)
                 self._tombstones.add(idx)
                 self._dirty = True
 
@@ -559,6 +573,78 @@ class SemanticIndex:
             return results
         return []
 
+    def query_dense_only_for_trees(
+        self,
+        text: str,
+        limit: int,
+        allowed_trees: AbstractSet[str],
+        max_probe: int,
+    ) -> List[Tuple[float, "MemoryNode"]]:
+        """Dense search returning only nodes whose ``tree`` is in *allowed_trees*.
+
+        When *allowed_trees* is only ``cmem``, uses a dedicated small sub-index so
+        retrieval does not depend on the full-forest dense matrix.
+
+        Otherwise scans up to ``min(max_probe, index size)`` neighbors in similarity
+        order so sparse trees still surface hits.
+        """
+        if not allowed_trees or limit <= 0:
+            return []
+        if len(allowed_trees) == 1 and "cmem" in allowed_trees:
+            return self._query_cmem_dense_subindex(text, limit)
+        with self._lock:
+            if (
+                not self._dense_available
+                or self._sbert is None
+                or self._dense_vectors is None
+                or self._dense_indexed == 0
+            ):
+                return []
+            faiss_idx = self._faiss_index
+            dv = self._dense_vectors
+            nodes_snap = list(self.nodes)
+            ts_snap = set(self._tombstones)
+        q_vec = self._cached_encode(text, timeout=2.0)
+        if q_vec is None:
+            return []
+        k_cap = max(limit * 8, 32)
+        if faiss_idx is not None and faiss_idx.ntotal > 0:
+            k = min(max(k_cap, max_probe), faiss_idx.ntotal)
+            distances, indices = faiss_idx.search(q_vec, k)
+            out: List[Tuple[float, "MemoryNode"]] = []
+            for j in range(k):
+                idx = int(indices[0][j])
+                if idx < 0 or idx >= len(nodes_snap) or idx in ts_snap:
+                    continue
+                node = nodes_snap[idx]
+                if getattr(node, "tree", None) not in allowed_trees:
+                    continue
+                d = float(distances[0][j])
+                sim = max(0.0, 1.0 - 0.5 * d)
+                out.append((sim, node))
+                if len(out) >= limit:
+                    break
+            return out
+        if dv is None:
+            return []
+        scores = (dv @ q_vec.T).ravel()
+        order = np.argsort(scores)[::-1]
+        scan = min(max(len(scores), 1), max_probe)
+        out = []
+        for rank in range(scan):
+            i = int(order[rank])
+            if i >= len(nodes_snap) or i in ts_snap:
+                continue
+            if float(scores[i]) <= 0:
+                continue
+            node = nodes_snap[i]
+            if getattr(node, "tree", None) not in allowed_trees:
+                continue
+            out.append((float(scores[i]), node))
+            if len(out) >= limit:
+                break
+        return out
+
     # --- Rebuild / compact ---
 
     def _compact(self):
@@ -574,6 +660,106 @@ class SemanticIndex:
             tokens = self._tokenize(self._node_text(node))
             for t in set(tokens):
                 self._doc_freq[t] += 1
+        self._cmem_node_indices = {
+            i for i, n in enumerate(self.nodes) if getattr(n, "tree", None) == "cmem"
+        }
+        self._cmem_dirty = True
+
+    def _cmem_live_nodes_ordered(self) -> List["MemoryNode"]:
+        """Cmem nodes in index order — only touches tracked cmem indices (not O(all nodes))."""
+        if not self._cmem_node_indices:
+            for i, n in enumerate(self.nodes):
+                if i not in self._tombstones and getattr(n, "tree", None) == "cmem":
+                    self._cmem_node_indices.add(i)
+        out: List[MemoryNode] = []
+        for i in sorted(self._cmem_node_indices):
+            if i < 0 or i >= len(self.nodes) or i in self._tombstones:
+                continue
+            n = self.nodes[i]
+            if getattr(n, "tree", None) == "cmem":
+                out.append(n)
+        return out
+
+    def _cmem_rebuild_if_dirty(self) -> None:
+        """Rebuild cmem-only vectors + Faiss IndexFlatIP from live ``self.nodes``."""
+        with self._lock:
+            if not self._cmem_dirty:
+                return
+            cmem_list = [
+                n
+                for n in self._cmem_live_nodes_ordered()
+            ]
+        if not cmem_list or not self._dense_available or self._sbert is None:
+            with self._lock:
+                self._cmem_nodes = []
+                self._cmem_dense = None
+                self._cmem_faiss = None
+                self._cmem_dirty = False
+            return
+        texts = [self._node_text(n) for n in cmem_list]
+        acquired = self._encode_lock.acquire(timeout=30.0)
+        if not acquired:
+            return
+        try:
+            vecs = self._sbert.encode(
+                texts, show_progress_bar=False, normalize_embeddings=True, batch_size=256
+            )
+        finally:
+            self._encode_lock.release()
+        vecs = np.ascontiguousarray(vecs, dtype=np.float32)
+        faiss_part: Optional[Any] = None
+        if _HAS_FAISS and len(vecs) > 0:
+            faiss_part = _faiss.IndexFlatIP(_SBERT_DIM)
+            faiss_part.add(vecs)
+        with self._lock:
+            # Avoid committing stale vectors if another thread rebuilt while we encoded,
+            # or if cmem rows changed during encode.
+            if not self._cmem_dirty:
+                return
+            fresh = list(self._cmem_live_nodes_ordered())
+            if [n.moment_id for n in fresh] != [n.moment_id for n in cmem_list]:
+                # Forest changed during encode; do not install stale vectors. Clear so
+                # callers never read a subindex that does not match live cmem rows.
+                self._cmem_nodes = []
+                self._cmem_dense = None
+                self._cmem_faiss = None
+                self._cmem_dirty = True
+                return
+            self._cmem_nodes = fresh
+            self._cmem_dense = vecs
+            self._cmem_faiss = faiss_part
+            self._cmem_dirty = False
+
+    def _query_cmem_dense_subindex(self, text: str, limit: int) -> List[Tuple[float, "MemoryNode"]]:
+        """Search only ``cmem`` nodes via a small index (no full-forest scan)."""
+        if limit <= 0 or not self._dense_available or self._sbert is None:
+            return []
+        self._cmem_rebuild_if_dirty()
+        with self._lock:
+            cmem_nodes = list(self._cmem_nodes)
+            faiss_idx = self._cmem_faiss
+            dv = self._cmem_dense
+        if not cmem_nodes:
+            return []
+        q_vec = self._cached_encode(text, timeout=2.0)
+        if q_vec is None:
+            return []
+        k = min(max(limit, 1), len(cmem_nodes))
+        if faiss_idx is not None and faiss_idx.ntotal > 0:
+            sims, indices = faiss_idx.search(q_vec, k)
+            out: List[Tuple[float, MemoryNode]] = []
+            for j in range(int(indices.shape[1])):
+                idx = int(indices[0][j])
+                if idx < 0 or idx >= len(cmem_nodes):
+                    continue
+                sim = float(sims[0][j])
+                out.append((max(0.0, sim), cmem_nodes[idx]))
+            return out[:limit]
+        if dv is not None:
+            scores = (dv @ q_vec.T).ravel()
+            order = np.argsort(scores)[::-1][:k]
+            return [(float(scores[i]), cmem_nodes[i]) for i in order][:limit]
+        return []
 
     def _rebuild(self):
         with self._lock:
@@ -648,6 +834,8 @@ class SemanticIndex:
             "dense_available": self._dense_available,
             "dense_indexed": self._dense_indexed,
             "faiss_active": self._faiss_index is not None,
+            "cmem_subindex_nodes": len(self._cmem_nodes),
+            "cmem_subindex_dirty": self._cmem_dirty,
             "sbert_model": _SBERT_MODEL_NAME if self._dense_available else None,
         }
 
@@ -678,6 +866,7 @@ class MemoryForest:
             "loop_tree",
             "value_tree",
             "emotion_tree",
+            "cmem",
         ]:
             self.trees[name] = MemoryTree(name)
 
@@ -802,15 +991,26 @@ class MemoryForest:
         limit: int = 10,
         min_confidence: float = 0.0,
         query_text: Optional[str] = None,
+        tree_names: Optional[AbstractSet[str]] = None,
+        tree_recall_max_probe: int = 2000,
     ) -> List[MemoryNode]:
         """Hybrid memory retrieval: index-driven candidates + tag/recency scoring.
 
         Phase 1a (outside forest lock): semantic index query.
         Phase 1b (brief lock): snapshot tag-match candidates from branches.
         Phase 2 (lock-free): score and rank candidates.
+
+        When *tree_names* is set (e.g. ``{\"cmem\"}``), only nodes in those trees
+        are candidates; dense search uses oversampling up to *tree_recall_max_probe*.
+
+        An **empty** *tree_names* set means no trees match — returns ``[]`` (distinct
+        from *None*, which means no tree filter).
         """
         search_text = query_text or (" ".join(query_tags) if query_tags else "")
         query_set = set(query_tags) if query_tags else set()
+        if tree_names is not None and len(tree_names) == 0:
+            return []
+        _tree_filter = frozenset(tree_names) if tree_names else None
 
         semantic_scores: Dict[str, float] = {}
         candidate_pool: Dict[str, MemoryNode] = {}
@@ -826,17 +1026,62 @@ class MemoryForest:
                 and not si._dirty
                 and si._dense_indexed >= len(si.nodes)
             )
-            if _use_dense_only:
+            # cmem-only retrieval uses the dedicated sub-index and does not require
+            # the full-forest dense matrix (see ``query_dense_only_for_trees``).
+            _cmem_only_dense = (
+                _tree_filter is not None
+                and len(_tree_filter) == 1
+                and "cmem" in _tree_filter
+                and si._dense_available
+                and si._sbert is not None
+            )
+            if _tree_filter:
+                if _use_dense_only or _cmem_only_dense:
+                    sem_results = si.query_dense_only_for_trees(
+                        search_text,
+                        _sem_k,
+                        _tree_filter,
+                        max(32, min(tree_recall_max_probe, 50_000)),
+                    )
+                else:
+                    # Align with tree_recall_max_probe (was hard-capped at 500, which hid sparse trees).
+                    _hq = min(max(_sem_k * 4, 64), min(tree_recall_max_probe, 20_000))
+                    sem_results = [
+                        (s, n)
+                        for s, n in si.query(search_text, limit=_hq)
+                        if getattr(n, "tree", None) in _tree_filter
+                    ][:_sem_k]
+            elif _use_dense_only:
                 sem_results = si.query_dense_only(search_text, limit=_sem_k)
             else:
                 sem_results = si.query(search_text, limit=_sem_k)
+            # Optional full-forest retry when cmem-only semantic pass is empty (see
+            # ``HAROMA_CMEM_RECALL_FALLBACK_FOREST``; default off for large-forest latency).
+            if (
+                _tree_filter
+                and len(_tree_filter) == 1
+                and "cmem" in _tree_filter
+                and not sem_results
+            ):
+                from mind.haroma_settings import haroma_cmem_recall_fallback_forest
+
+                if haroma_cmem_recall_fallback_forest():
+                    if _use_dense_only:
+                        sem_results = si.query_dense_only(search_text, limit=_sem_k)
+                    else:
+                        sem_results = si.query(search_text, limit=_sem_k)
             for sim, node in sem_results:
                 candidate_pool[node.moment_id] = node
                 semantic_scores[node.moment_id] = sim
 
         with self._lock:
             if query_set:
-                for tree in self.trees.values():
+                trees_iter = (
+                    (self.trees.get(n) for n in tree_names if self.trees.get(n))
+                    if tree_names
+                    else self.trees.values()
+                )
+                for tree in trees_iter:
                     for branch in tree.branches.values():
                         tail = branch.nodes[-(limit * 10) :]
                         for node in tail:
@@ -845,7 +1090,12 @@ class MemoryForest:
 
             if not search_text and not query_set:
                 per_branch = max(3, limit)
-                for tree in self.trees.values():
+                trees_iter = (
+                    (self.trees.get(n) for n in tree_names if self.trees.get(n))
+                    if tree_names
+                    else self.trees.values()
+                )
+                for tree in trees_iter:
                     for branch in tree.branches.values():
                         for node in branch.nodes[-per_branch:]:
                             candidate_pool[node.moment_id] = node
@@ -916,8 +1166,11 @@ class MemoryForest:
         limit: int,
         *,
         fast_cycle: bool = False,
+        prepend_prime: bool = True,
     ) -> List[MemoryNode]:
         """Prepend curated ``prime`` memories; trim to *limit* (reserves slots on fast path)."""
+        if not prepend_prime:
+            return recalled[:limit] if recalled else []
         prime_cap = 2 if fast_cycle else min(4, max(1, limit))
         prime_nodes = self.collect_prime_nodes(max_nodes=prime_cap)
         if not prime_nodes:
@@ -965,16 +1218,38 @@ class MemoryForest:
         scored.sort(key=lambda x: x[0], reverse=True)
         return [n for _, n in scored[:limit]]
 
-    def recall_fast(self, query_text: str, limit: int = 10) -> List[MemoryNode]:
+    def recall_fast(
+        self,
+        query_text: str,
+        limit: int = 10,
+        tree_names: Optional[AbstractSet[str]] = None,
+        tree_recall_max_probe: int = 2000,
+    ) -> List[MemoryNode]:
         """Lock-free fast recall: FAISS-only search, no TF-IDF, no rebuild.
 
         Designed for the fast-path chat handler where sub-second latency
         matters more than exhaustive retrieval.  Safe to call concurrently
         with the LifeLoop because it only reads immutable snapshots.
+
+        When *tree_names* is set, only those trees are searched (oversampled).
         """
         if not query_text:
             return []
-        results = self.semantic_index.query_dense_only(query_text, limit=limit)
+        if tree_names:
+            tf = frozenset(tree_names)
+            results = self.semantic_index.query_dense_only_for_trees(
+                query_text,
+                limit,
+                tf,
+                max(32, min(tree_recall_max_probe, 50_000)),
+            )
+            if not results and len(tf) == 1 and "cmem" in tf:
+                from mind.haroma_settings import haroma_cmem_recall_fallback_forest
+
+                if haroma_cmem_recall_fallback_forest():
+                    results = self.semantic_index.query_dense_only(query_text, limit=limit)
+        else:
+            results = self.semantic_index.query_dense_only(query_text, limit=limit)
         return [node for _, node in results]
 
     def get_all_nodes(self) -> List[MemoryNode]:

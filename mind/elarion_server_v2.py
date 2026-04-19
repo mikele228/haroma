@@ -41,9 +41,10 @@ so you can see the last stage reached before a stall. Use ``HAROMA_INPUT_PIPELIN
 ``HAROMA_LLM_DUMMY_REPLY=1`` skips real ``generate_chat`` only inside packed-LLM
 inference; the full persona stack (including ``persona_neural_section`` / shared
 neural read lock and encoder) still runs — use that to measure **pipeline** latency
-without decode. ``HAROMA_LLM_DUMMY_FULL_PACK``
-controls whether :mod:`engine.LLMContextReasoner` runs the expensive ``build_messages``
-path while dummy (pack-size profiling).
+without decode. By default, dummy mode still runs full ``build_messages`` (same
+pre-decode work as production). ``HAROMA_LLM_DUMMY_FAST_PACK=1`` or
+``HAROMA_LLM_DUMMY_FULL_PACK=0`` opts into a tiny placeholder prompt inside
+:mod:`engine.LLMContextReasoner` only.
 
 ``HAROMA_LLM_LOG_PAYLOAD=1`` logs packed prompt messages and raw model output as JSON
 lines from :mod:`engine.LLMContextReasoner` (optional ``HAROMA_LLM_LOG_PAYLOAD_PER_MESSAGE_CHARS``,
@@ -56,9 +57,10 @@ work so input completes first
 (see :mod:`mind.chat_priority`). Set to ``0`` to interleave as before.
 
 ``HAROMA_TRUESELF_HTTP_CHAT_UNPHASED`` (default ``1``): when ``HAROMA_PERSONA_PHASED_CYCLE=1``,
-still run **HTTP-traced** TrueSelf conversant turns in **one** synchronous pass (no
-multi-tick phased scheduling), so async ``/chat`` is not stretched across ticks.
-Set to ``0`` to use phased mode for TrueSelf like other agents.
+still run **HTTP-traced** conversant work in **one** synchronous pass (TrueSelf
+direct ``/chat`` and ``trueself_delegate`` specialists carrying the same trace), so
+async ``/chat`` is not stretched across persona ticks. Set to ``0`` to use phased
+mode for those turns like other agents.
 
 After each persona cognitive cycle, if **HTTP /chat or text queues** are still
 active (see :func:`mind.chat_priority.input_pipeline_yield_busy`; sensor-only
@@ -1125,7 +1127,7 @@ def save_state():
     try:
         result = ba.shared.persistence.save(ba.shared)
         return _json({"status": "saved", "details": result})
-    except Exception as e:
+    except Exception:
         _tb.print_exc()
         return _json({"status": "error", "details": "save failed"}, 500)
 

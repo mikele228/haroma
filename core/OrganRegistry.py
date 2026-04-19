@@ -9,7 +9,7 @@ from a static catalog, then enriched with live module references so
 from __future__ import annotations
 
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from core.CellRoles import get_role_label, summary as cell_roles_summary
 

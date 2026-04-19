@@ -5,7 +5,7 @@ from __future__ import annotations
 import importlib
 import json
 import os
-from typing import Any, Callable, Dict, Optional, Type
+from typing import Any, Callable, Dict
 
 from integrations.sim.backends.http_json_backend import HttpJsonSimulationBackend
 from integrations.sim.backends.null_backend import NullSimulationBackend

@@ -106,6 +106,9 @@ def run_packed_llm_phase_for_elarion_controller(
         speaker_key=None,
         session_uid=False,
         first_encounter_asks_name=False,
+        deliberative_flag=deliberative_flag,
+        llm_ctx_enabled=bool(_llm_ctx_enabled),
+        role=str(role or ""),
     )
 
     _memory_forest_seed = ""

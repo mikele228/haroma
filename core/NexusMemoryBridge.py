@@ -6,7 +6,7 @@ Writes to ``belief_tree`` / ``nexus_sync`` with ``prime`` and ``nexus`` tags so
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, List, Optional, TYPE_CHECKING
 
 from core.Memory import MemoryNode
 

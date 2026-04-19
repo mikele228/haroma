@@ -29,6 +29,7 @@ import mind.http_chat_timeouts as _hc
 import mind.llm_context_timeout as _lt
 import mind.prompt_packaging as _pp
 import mind.response_text as _rt
+import mind.haroma_settings as _hs
 
 
 def test_barrel_matches_submodules():
@@ -62,6 +63,7 @@ def test_barrel_matches_submodules():
     assert cc.merge_deliberative_into_llm_context is _dm.merge_deliberative_into_llm_context
     assert cc.complete_deferred_deliberative_llm_context is _dm.complete_deferred_deliberative_llm_context
     assert cc.merge_first_encounter_discourse_hint is _pld.merge_first_encounter_discourse_hint
+    assert cc.haroma_memory_recall_intensity is _hs.haroma_memory_recall_intensity
     assert cc.llm_context_timeout_seconds is _lt.llm_context_timeout_seconds
     assert cc.run_llm_context_reasoning is _pp.run_llm_context_reasoning
     assert cc.packed_llm_timeout_seconds is _pp.packed_llm_timeout_seconds

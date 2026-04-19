@@ -528,8 +528,6 @@ def override_tier(tier: int):
     if _CONFIG is None:
         _CONFIG = detect_resources()
 
-    models_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models")
-
     _CONFIG.tier = tier
     _CONFIG.tier_name = TIER_NAMES.get(tier, "unknown")
     _CONFIG.encoder = _encoder_config(tier)

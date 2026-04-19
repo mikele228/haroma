@@ -19,7 +19,6 @@ gradually earn influence via the standard earned-weight ramp.
 from __future__ import annotations
 
 from typing import Dict, Any, List, Optional, Tuple
-import math
 import random
 
 try:

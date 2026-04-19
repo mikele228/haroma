@@ -185,7 +185,7 @@ def main() -> int:
 
     if not os.path.isfile(args.messages):
         print(f"Messages file not found: {args.messages}", file=sys.stderr)
-        print(f"Create it or pass --messages (default sits beside this script).", file=sys.stderr)
+        print("Create it or pass --messages (default sits beside this script).", file=sys.stderr)
         return 2
 
     try:

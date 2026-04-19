@@ -10,7 +10,7 @@ queue integrity and organ registry layers.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Set
+from typing import Any, Dict, List
 
 
 GENERATOR = 0b001

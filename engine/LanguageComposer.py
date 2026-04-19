@@ -22,7 +22,6 @@ import math
 import os
 import random
 import re
-import threading
 
 try:
     import torch

@@ -26,5 +26,6 @@ source of truth; tests may import them directly for identity checks.
 
 **Configuration:** Prefer :mod:`mind.haroma_settings` for grouped ``HAROMA_*`` /
 ``ELARION_*`` reads; :mod:`mind.config_env` for generic ``env_truthy`` / ``env_int``.
-Additional keys still exist in submodules (e.g. ``mind.packed_llm_*``).
+Additional keys still exist in submodules (e.g. ``mind.packed_llm_*``). Dialogue-only
+roadmap tiers: :mod:`mind.dialogue_phases` and ``HAROMA_DIALOGUE_PHASE`` (1–9).
 """

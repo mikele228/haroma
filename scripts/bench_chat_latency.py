@@ -81,11 +81,6 @@ def main() -> int:
             break
         time.sleep(0.02)
     elapsed = time.perf_counter() - t0
-    lt = None
-    if isinstance(j.get("latency_trace"), list):
-        for row in j["latency_trace"]:
-            if isinstance(row, dict) and row.get("t_end"):
-                lt = row
     print(f"async_chat_e2e_sec={elapsed:.3f}")
     if j.get("llm_context") and isinstance(j["llm_context"], dict):
         lm = j["llm_context"].get("latency_ms")
